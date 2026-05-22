@@ -162,6 +162,7 @@ pub(crate) async fn create_api_account_internal(
             usage_error: None,
             auth_refresh_blocked: false,
             auth_refresh_error: None,
+            api_proxy_enabled: true,
         };
         profile_files::sync_account_profile_in_store_path(
             &account_store_path_from_data_dir(&app_paths::app_data_dir(app)?),
@@ -381,6 +382,36 @@ pub(crate) async fn update_account_label_internal(
 
     save_store(app, &store)?;
     Ok(resolved_label)
+}
+
+pub(crate) async fn update_account_api_proxy_enabled_internal(
+    app: &AppHandle,
+    state: &AppState,
+    account_key: &str,
+    enabled: bool,
+) -> Result<bool, String> {
+    let now = now_unix_seconds();
+
+    let _guard = state.store_lock.lock().await;
+    let mut store = load_store(app)?;
+    let mut updated = false;
+
+    for account in store
+        .accounts
+        .iter_mut()
+        .filter(|account| account.account_key() == account_key)
+    {
+        account.api_proxy_enabled = enabled;
+        account.updated_at = now;
+        updated = true;
+    }
+
+    if !updated {
+        return Err("未找到要设置反代状态的账号".to_string());
+    }
+
+    save_store(app, &store)?;
+    Ok(enabled)
 }
 
 /// 拉取并刷新所有账号用量，返回可直接用于前端/状态栏显示的摘要。
@@ -1151,6 +1182,7 @@ fn upsert_prepared_import(
             usage_error: None,
             auth_refresh_blocked: false,
             auth_refresh_error: None,
+            api_proxy_enabled: true,
         };
         let summary = stored.to_summary(current_account_key, current_variant_key);
         store.accounts.push(stored);
@@ -1182,6 +1214,7 @@ fn upsert_prepared_import(
             usage_error: None,
             auth_refresh_blocked: false,
             auth_refresh_error: None,
+            api_proxy_enabled: true,
         };
         let summary = stored.to_summary(current_account_key, current_variant_key);
         store.accounts.push(stored);
@@ -1663,6 +1696,7 @@ mod tests {
             usage_error: None,
             auth_refresh_blocked: false,
             auth_refresh_error: None,
+            api_proxy_enabled: true,
         });
 
         let prepared = prepared_import(

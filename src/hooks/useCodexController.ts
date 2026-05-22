@@ -1637,6 +1637,75 @@ export function useCodexController() {
     [copy.notices, localizeError, renamingAccountId],
   );
 
+  const onToggleAccountApiProxy = useCallback(
+    async (account: AccountSummary, enabled: boolean): Promise<boolean> => {
+      const previousEnabled = account.apiProxyEnabled;
+      setAccounts((prev) =>
+        prev.map((item) =>
+          item.accountKey === account.accountKey
+            ? {
+                ...item,
+                apiProxyEnabled: enabled,
+              }
+            : item,
+        ),
+      );
+
+      try {
+        const resolvedEnabled = await invoke<boolean>("update_account_api_proxy_enabled", {
+          accountKey: account.accountKey,
+          enabled,
+        });
+        setAccounts((prev) =>
+          prev.map((item) =>
+            item.accountKey === account.accountKey
+              ? {
+                  ...item,
+                  apiProxyEnabled: resolvedEnabled,
+                }
+              : item,
+          ),
+        );
+        if (!resolvedEnabled) {
+          setApiProxyStatus((prev) =>
+            prev.activeAccountKey === account.accountKey
+              ? {
+                  ...prev,
+                  activeAccountKey: null,
+                  activeAccountId: null,
+                  activeAccountLabel: null,
+                }
+              : prev,
+          );
+        }
+        setNotice({
+          type: "ok",
+          message: resolvedEnabled
+            ? copy.notices.accountApiProxyEnabled(account.label)
+            : copy.notices.accountApiProxyDisabled(account.label),
+        });
+        return true;
+      } catch (error) {
+        setAccounts((prev) =>
+          prev.map((item) =>
+            item.accountKey === account.accountKey
+              ? {
+                  ...item,
+                  apiProxyEnabled: previousEnabled,
+                }
+              : item,
+          ),
+        );
+        setNotice({
+          type: "error",
+          message: copy.notices.accountApiProxyToggleFailed(localizeError(String(error))),
+        });
+        return false;
+      }
+    },
+    [copy.notices, localizeError],
+  );
+
   const onDelete = useCallback(async (account: AccountSummary) => {
     if (pendingDeleteId !== account.id) {
       setPendingDeleteId(account.id);
@@ -1896,6 +1965,7 @@ export function useCodexController() {
     onStartCloudflared,
     onStopCloudflared,
     onRenameAccountLabel,
+    onToggleAccountApiProxy,
     onDelete,
     onSwitch,
     onSmartSwitch,
