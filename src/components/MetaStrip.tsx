@@ -50,13 +50,12 @@ function MetricIcon({ tone }: MetricIconProps) {
   );
 }
 
-function hasAccountIssue(account: AccountSummary): boolean {
+function hasBlockingAccountIssue(account: AccountSummary): boolean {
   return Boolean(
     account.authRefreshBlocked ||
       account.profileIntegrityError ||
       account.profileLastValidationError ||
-      account.authRefreshError ||
-      account.usageError,
+      account.authRefreshError,
   );
 }
 
@@ -74,10 +73,10 @@ export function MetaStrip({
 }: MetaStripProps) {
   const { copy, locale } = useI18n();
   const isChinese = locale === "zh-CN";
-  const issueCount = accounts.filter(hasAccountIssue).length;
-  const exhaustedCount = accounts.filter((account) => !hasAccountIssue(account) && hasExhaustedWindow(account)).length;
+  const issueCount = accounts.filter(hasBlockingAccountIssue).length;
+  const exhaustedCount = accounts.filter((account) => !hasBlockingAccountIssue(account) && hasExhaustedWindow(account)).length;
   const activeCount = accounts.filter(
-    (account) => !hasAccountIssue(account) && !hasExhaustedWindow(account) && account.profileAuthReady,
+    (account) => !hasBlockingAccountIssue(account) && !hasExhaustedWindow(account) && account.profileAuthReady,
   ).length;
   const metrics: Array<{
     label: string;

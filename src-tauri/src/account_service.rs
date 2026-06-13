@@ -55,6 +55,8 @@ use crate::utils::truncate_for_error;
 const DEACTIVATED_WORKSPACE_NOTICE: &str = "该账号已被踢出 team 组织，请重新授权后再刷新。";
 const DEACTIVATED_ACCOUNT_NOTICE: &str = "账号被封禁，请检查邮箱";
 const AUTH_EXPIRED_NOTICE: &str = "工具保存的授权快照已失效，请重新登录授权。";
+const USAGE_AUTH_TOKEN_EXPIRED_NOTICE: &str =
+    "用量刷新失败：登录令牌已过期，请刷新用量或切换账号重新校验。";
 const EXPORT_ARCHIVE_ENTRY_NAME: &str = "accounts.json";
 const KEEPALIVE_REFRESH_WINDOW_SECS: i64 = 10 * 60;
 // 对齐 Codex 官方客户端的刷新模型：不要每隔几小时刷新一次 refresh_token。
@@ -1166,9 +1168,17 @@ fn should_retry_with_token_refresh(
 
 fn should_suspend_auth_keepalive(raw_error: &str) -> bool {
     let normalized = raw_error.to_ascii_lowercase();
+    is_refresh_token_invalidation_error(&normalized)
+        || normalized.contains("deactivated_workspace")
+        || normalized.contains("your openai account has been deactivated")
+        || normalized.contains("account has been deactivated")
+        || normalized.contains("account deactivated")
+        || normalized.contains("deactivated_user")
+}
+
+fn is_refresh_token_invalidation_error(normalized: &str) -> bool {
     normalized.contains("refresh_token_reused")
-        || is_invalid_refresh_grant(&normalized)
-        || normalized.contains("provided authentication token is expired")
+        || is_invalid_refresh_grant(normalized)
         || normalized
             .contains("your refresh token has already been used to generate a new access token")
         || normalized.contains("refresh token expired")
@@ -1180,12 +1190,6 @@ fn should_suspend_auth_keepalive(raw_error: &str) -> bool {
         || normalized.contains("refresh token invalid")
         || normalized.contains("invalid refresh token")
         || normalized.contains("please try signing in again")
-        || normalized.contains("token is expired")
-        || normalized.contains("deactivated_workspace")
-        || normalized.contains("your openai account has been deactivated")
-        || normalized.contains("account has been deactivated")
-        || normalized.contains("account deactivated")
-        || normalized.contains("deactivated_user")
         || normalized.contains("auth.json 缺少 refresh_token")
 }
 
@@ -1202,24 +1206,13 @@ fn normalize_usage_error_message(raw_error: &str) -> String {
     {
         return DEACTIVATED_ACCOUNT_NOTICE.to_string();
     }
-    if normalized.contains("refresh_token_reused")
-        || is_invalid_refresh_grant(&normalized)
-        || normalized.contains("provided authentication token is expired")
-        || normalized
-            .contains("your refresh token has already been used to generate a new access token")
-        || normalized.contains("refresh token expired")
-        || normalized.contains("refresh_token expired")
-        || normalized.contains("expired refresh token")
-        || normalized.contains("refresh token is expired")
-        || normalized.contains("refresh token revoked")
-        || normalized.contains("refresh_token_revoked")
-        || normalized.contains("refresh token invalid")
-        || normalized.contains("invalid refresh token")
-        || normalized.contains("please try signing in again")
-        || normalized.contains("token is expired")
-        || normalized.contains("auth.json 缺少 refresh_token")
-    {
+    if is_refresh_token_invalidation_error(&normalized) {
         return AUTH_EXPIRED_NOTICE.to_string();
+    }
+    if normalized.contains("provided authentication token is expired")
+        || normalized.contains("token is expired")
+    {
+        return USAGE_AUTH_TOKEN_EXPIRED_NOTICE.to_string();
     }
     raw_error.to_string()
 }
@@ -1872,6 +1865,7 @@ mod tests {
     use super::AUTH_EXPIRED_NOTICE;
     use super::KEEPALIVE_LAST_REFRESH_BASE_AGE_SECS;
     use super::KEEPALIVE_LAST_REFRESH_JITTER_SECS;
+    use super::USAGE_AUTH_TOKEN_EXPIRED_NOTICE;
     use crate::models::AccountsStore;
     use crate::models::StoredAccount;
     use crate::models::UsageSnapshot;
@@ -2252,5 +2246,16 @@ mod tests {
 
         assert!(should_suspend_auth_keepalive(error));
         assert_eq!(normalize_usage_error_message(error), AUTH_EXPIRED_NOTICE);
+    }
+
+    #[test]
+    fn access_token_expired_usage_errors_do_not_suspend_keepalive() {
+        let error = "请求用量接口失败: 401 Unauthorized: provided authentication token is expired";
+
+        assert!(!should_suspend_auth_keepalive(error));
+        assert_eq!(
+            normalize_usage_error_message(error),
+            USAGE_AUTH_TOKEN_EXPIRED_NOTICE
+        );
     }
 }

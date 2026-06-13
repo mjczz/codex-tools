@@ -522,37 +522,48 @@ fn ensure_codex_proxy_backup(
     auth_path: &Path,
     bound_base_url: &str,
 ) -> Result<(), String> {
-    let metadata_path = codex_proxy_backup_metadata_path()?;
+    let backup_dir = codex_proxy_backup_dir()?;
+    ensure_codex_proxy_backup_in_dir(config_path, auth_path, &backup_dir, bound_base_url)
+}
+
+fn ensure_codex_proxy_backup_in_dir(
+    config_path: &Path,
+    auth_path: &Path,
+    backup_dir: &Path,
+    bound_base_url: &str,
+) -> Result<(), String> {
+    let metadata_path = backup_dir.join(CODEX_PROXY_BACKUP_METADATA_FILE_NAME);
     if metadata_path.is_file() {
         return Ok(());
     }
 
-    let backup_dir = codex_proxy_backup_dir()?;
-    fs::create_dir_all(&backup_dir).map_err(|error| {
+    fs::create_dir_all(backup_dir).map_err(|error| {
         format!(
             "创建 Codex 反代备份目录失败 {}: {error}",
             backup_dir.display()
         )
     })?;
-    set_private_permissions(&backup_dir);
+    set_private_permissions(backup_dir);
 
     let config_existed = config_path.is_file();
     if config_existed {
-        fs::copy(config_path, codex_proxy_config_backup_path()?).map_err(|error| {
+        let config_backup_path = backup_dir.join(PROFILE_CONFIG_FILE_NAME);
+        fs::copy(config_path, &config_backup_path).map_err(|error| {
             format!(
                 "备份 Codex config.toml 失败 {}: {error}",
                 config_path.display()
             )
         })?;
-        set_private_permissions(&codex_proxy_config_backup_path()?);
+        set_private_permissions(&config_backup_path);
     }
 
     let auth_existed = auth_path.is_file();
     if auth_existed {
-        fs::copy(auth_path, codex_proxy_auth_backup_path()?).map_err(|error| {
+        let auth_backup_path = backup_dir.join(PROFILE_AUTH_FILE_NAME);
+        fs::copy(auth_path, &auth_backup_path).map_err(|error| {
             format!("备份 Codex auth.json 失败 {}: {error}", auth_path.display())
         })?;
-        set_private_permissions(&codex_proxy_auth_backup_path()?);
+        set_private_permissions(&auth_backup_path);
     }
 
     let metadata = CodexProxyBindingBackupMetadata {
@@ -698,8 +709,23 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::build_codex_proxy_config;
+    use super::ensure_codex_proxy_backup_in_dir;
     use super::normalize_codex_proxy_base_url;
+    use super::CODEX_PROXY_BACKUP_METADATA_FILE_NAME;
+    use super::PROFILE_AUTH_FILE_NAME;
+    use super::PROFILE_CONFIG_FILE_NAME;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
     use toml_edit::DocumentMut;
+    use uuid::Uuid;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "codex-tools-profile-files-test-{name}-{}",
+            Uuid::new_v4()
+        ))
+    }
 
     #[test]
     fn build_codex_proxy_config_points_builtin_openai_at_local_proxy() {
@@ -732,5 +758,94 @@ openai_base_url = "https://api.openai.com/v1"
             Some("http://127.0.0.1:8787/v1")
         );
         assert_eq!(normalize_codex_proxy_base_url("   "), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_codex_proxy_backup_keeps_backup_dir_searchable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = unique_test_dir("backup");
+        let codex_dir = sandbox.join("codex");
+        let backup_dir = sandbox.join("backup");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let config_path = codex_dir.join(PROFILE_CONFIG_FILE_NAME);
+        let auth_path = codex_dir.join(PROFILE_AUTH_FILE_NAME);
+        fs::write(&config_path, "model = \"gpt-5.4\"\n").expect("write config");
+        fs::write(&auth_path, "{\"OPENAI_API_KEY\":\"sk-test\"}\n").expect("write auth");
+
+        ensure_codex_proxy_backup_in_dir(
+            &config_path,
+            &auth_path,
+            &backup_dir,
+            "http://127.0.0.1:8787/v1",
+        )
+        .expect("backup should succeed");
+
+        let mode = fs::metadata(&backup_dir)
+            .expect("read backup dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        assert_eq!(
+            fs::read_to_string(backup_dir.join(PROFILE_CONFIG_FILE_NAME))
+                .expect("read backup config"),
+            "model = \"gpt-5.4\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(backup_dir.join(PROFILE_AUTH_FILE_NAME)).expect("read backup auth"),
+            "{\"OPENAI_API_KEY\":\"sk-test\"}\n"
+        );
+        assert!(backup_dir
+            .join(CODEX_PROXY_BACKUP_METADATA_FILE_NAME)
+            .is_file());
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_codex_proxy_backup_repairs_existing_unsearchable_backup_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = unique_test_dir("backup-repair");
+        let codex_dir = sandbox.join("codex");
+        let backup_dir = sandbox.join("backup");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        fs::create_dir_all(&backup_dir).expect("create backup dir");
+
+        let mut permissions = fs::metadata(&backup_dir)
+            .expect("read backup dir metadata")
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&backup_dir, permissions).expect("make backup dir unsearchable");
+
+        let config_path = codex_dir.join(PROFILE_CONFIG_FILE_NAME);
+        let auth_path = codex_dir.join(PROFILE_AUTH_FILE_NAME);
+        fs::write(&config_path, "model = \"gpt-5.5\"\n").expect("write config");
+        fs::write(&auth_path, "{\"OPENAI_API_KEY\":\"sk-test\"}\n").expect("write auth");
+
+        ensure_codex_proxy_backup_in_dir(
+            &config_path,
+            &auth_path,
+            &backup_dir,
+            "http://127.0.0.1:8787/v1",
+        )
+        .expect("backup should repair directory permissions and succeed");
+
+        let mode = fs::metadata(&backup_dir)
+            .expect("read repaired backup dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        assert_eq!(
+            fs::read_to_string(backup_dir.join(PROFILE_CONFIG_FILE_NAME))
+                .expect("read backup config"),
+            "model = \"gpt-5.5\"\n"
+        );
+
+        let _ = fs::remove_dir_all(&sandbox);
     }
 }

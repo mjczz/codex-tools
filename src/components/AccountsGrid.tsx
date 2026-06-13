@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AccountSummary, CodexTokenUsageSnapshot, UsageWindow } from "../types/app";
 import { useI18n } from "../i18n/I18nProvider";
 import { compareAccountsByRemaining } from "../utils/accountRanking";
@@ -120,13 +120,12 @@ function sortVariantsForGroup(left: AccountSummary, right: AccountSummary): numb
   return compareAccountsByRemaining(left, right);
 }
 
-function accountHasIssue(account: AccountSummary): boolean {
+function accountHasBlockingIssue(account: AccountSummary): boolean {
   return Boolean(
     account.authRefreshBlocked ||
       account.profileIntegrityError ||
       account.profileLastValidationError ||
-      account.authRefreshError ||
-      account.usageError,
+      account.authRefreshError,
   );
 }
 
@@ -135,7 +134,6 @@ function accountIssueReason(account: AccountSummary, fallbackReason: string): st
     account.profileIntegrityError ||
     account.profileLastValidationError ||
     account.authRefreshError ||
-    account.usageError ||
     (account.authRefreshBlocked ? fallbackReason : null)
   );
 }
@@ -161,7 +159,7 @@ function lowestRemaining(account: AccountSummary): number | null {
 }
 
 function accountStatus(account: AccountSummary): AccountStatus {
-  if (accountHasIssue(account)) {
+  if (accountHasBlockingIssue(account)) {
     return "issue";
   }
 
@@ -519,7 +517,28 @@ export function AccountsGrid({
   const [editingAliasId, setEditingAliasId] = useState<string | null>(null);
   const [aliasDraft, setAliasDraft] = useState("");
   const [openMenuAccountId, setOpenMenuAccountId] = useState<string | null>(null);
+  const openMenuRootRef = useRef<HTMLDivElement | null>(null);
   const [switchRecords, setSwitchRecords] = useState<SwitchRecord[]>([]);
+
+  useEffect(() => {
+    if (!openMenuAccountId || typeof document === "undefined") {
+      return undefined;
+    }
+
+    const closeOpenMenu = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && openMenuRootRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpenMenuAccountId(null);
+    };
+
+    document.addEventListener("pointerdown", closeOpenMenu, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOpenMenu, true);
+    };
+  }, [openMenuAccountId]);
 
   const groupedAccounts = useMemo<AccountGroup[]>(() => {
     const groups = new Map<string, AccountSummary[]>();
@@ -832,7 +851,7 @@ export function AccountsGrid({
                       />
                       <span />
                     </label>
-                    <div className="rowActions">
+                    <div className="rowActions" ref={isMenuOpen ? openMenuRootRef : undefined}>
                       <button
                         type="button"
                         className="rowSwitchButton"

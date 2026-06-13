@@ -214,8 +214,8 @@ npm run build
 触发发布：
 
 ```bash
-git tag v2.0.0
-git push origin v2.0.0
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
 发布内容：

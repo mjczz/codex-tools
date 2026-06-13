@@ -65,6 +65,16 @@ const REPLACEMENTS: PhraseReplacement[] = [
     ),
   },
   {
+    source: "用量刷新失败：登录令牌已过期，请刷新用量或切换账号重新校验。",
+    target: phrases(
+      "用量刷新失败：登录令牌已过期，请刷新用量或切换账号重新校验。",
+      "Usage refresh failed because the sign-in token expired. Refresh usage or switch accounts to check again.",
+      "サインイントークンの期限が切れたため、使用量の更新に失敗しました。使用量を更新するか、アカウントを切り替えて再確認してください。",
+      "로그인 토큰이 만료되어 사용량 새로고침에 실패했습니다. 사용량을 새로고침하거나 계정을 전환해 다시 확인하세요.",
+      "Не удалось обновить использование: срок действия токена входа истек. Обновите использование или переключите аккаунт для повторной проверки."
+    ),
+  },
+  {
     source: "当前账号不是 ChatGPT 登录模式，无法读取 Codex 5h/1week 用量。请先执行 codex login。",
     target: phrases(
       "当前账号不是 ChatGPT 登录模式，无法读取 Codex 5h/1week 用量。请先执行 codex login。",
