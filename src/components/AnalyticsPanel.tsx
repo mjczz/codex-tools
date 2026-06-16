@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider";
 import type {
   CodexBudgetAlert,
@@ -20,6 +20,7 @@ type AnalyticsPanelProps = {
   savingSettings: boolean;
   onRefresh: () => void;
   onExport: (format: "csv" | "json") => void;
+  onDeleteSession: (session: CodexSessionCostBreakdown) => Promise<void> | void;
   onUpdateWeeklyBudget: (value: number | null) => Promise<void>;
 };
 
@@ -36,7 +37,10 @@ function formatUsd(value: number, locale: string) {
 }
 
 function formatNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(value);
+  return new Intl.NumberFormat(locale, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
 }
 
 function formatDateTime(value: number | null, locale: string) {
@@ -63,7 +67,10 @@ function formatDuration(seconds: number | null, locale: string) {
   return `${new Intl.NumberFormat(locale).format(hours)}h ${minutes}m`;
 }
 
-function alertLabel(alert: CodexBudgetAlert, copy: ReturnType<typeof useI18n>["copy"]["analytics"]) {
+function alertLabel(
+  alert: CodexBudgetAlert,
+  copy: ReturnType<typeof useI18n>["copy"]["analytics"],
+) {
   if (alert === "danger") {
     return copy.budgetDanger;
   }
@@ -106,12 +113,18 @@ function Heatmap({
   buckets: CodexHourlyCostBucket[];
   locale: string;
 }) {
-  const byKey = new Map(buckets.map((bucket) => [`${bucket.weekday}:${bucket.hour}`, bucket]));
+  const byKey = new Map(
+    buckets.map((bucket) => [`${bucket.weekday}:${bucket.hour}`, bucket]),
+  );
   const maxTokens = Math.max(...buckets.map((bucket) => bucket.tokens), 1);
   const hourLabels = Array.from({ length: 24 }, (_, hour) => hour);
 
   return (
-    <div className="analyticsHeatmap" role="img" aria-label="Codex token activity heatmap">
+    <div
+      className="analyticsHeatmap"
+      role="img"
+      aria-label="Codex token activity heatmap"
+    >
       <div className="analyticsHeatmapHeader" aria-hidden="true">
         <span />
         {hourLabels.map((hour) => (
@@ -123,13 +136,17 @@ function Heatmap({
           <span>{label}</span>
           {hourLabels.map((hour) => {
             const bucket = byKey.get(`${weekday}:${hour}`);
-            const intensity = bucket ? Math.max(0.08, bucket.tokens / maxTokens) : 0;
+            const intensity = bucket
+              ? Math.max(0.08, bucket.tokens / maxTokens)
+              : 0;
             const title = `${label} ${hour}:00, ${formatNumber(bucket?.tokens ?? 0, locale)} tokens`;
             return (
               <i
                 key={hour}
                 title={title}
-                style={{ opacity: intensity === 0 ? 0.18 : 0.24 + intensity * 0.76 }}
+                style={{
+                  opacity: intensity === 0 ? 0.18 : 0.24 + intensity * 0.76,
+                }}
               />
             );
           })}
@@ -146,7 +163,10 @@ function ProjectRows({
   projects: CodexProjectCostBreakdown[];
   locale: string;
 }) {
-  const maxCost = Math.max(...projects.map((project) => project.costUsd), 0.000001);
+  const maxCost = Math.max(
+    ...projects.map((project) => project.costUsd),
+    0.000001,
+  );
 
   return (
     <div className="analyticsProjectList">
@@ -158,13 +178,20 @@ function ProjectRows({
           </div>
           <div className="analyticsProjectMetrics">
             <b>{formatUsd(project.costUsd, locale)}</b>
-            <small>{formatNumber(project.total.totalTokens, locale)} tokens</small>
+            <small>
+              {formatNumber(project.total.totalTokens, locale)} tokens
+            </small>
           </div>
           <div className="analyticsProjectBar" aria-hidden="true">
-            <i style={{ width: `${Math.max(4, (project.costUsd / maxCost) * 100)}%` }} />
+            <i
+              style={{
+                width: `${Math.max(4, (project.costUsd / maxCost) * 100)}%`,
+              }}
+            />
           </div>
           <small>
-            {project.sessionCount} sessions · {project.promptCount} prompts · {project.eventCount} events
+            {project.sessionCount} sessions · {project.promptCount} prompts ·{" "}
+            {project.eventCount} events
           </small>
         </article>
       ))}
@@ -175,9 +202,17 @@ function ProjectRows({
 function SessionTable({
   sessions,
   locale,
+  text,
+  pendingDeleteSessionId,
+  deletingSessionId,
+  onDeleteSession,
 }: {
   sessions: CodexSessionCostBreakdown[];
   locale: string;
+  text: ReturnType<typeof useI18n>["copy"]["analytics"];
+  pendingDeleteSessionId: string | null;
+  deletingSessionId: string | null;
+  onDeleteSession: (session: CodexSessionCostBreakdown) => void;
 }) {
   return (
     <div className="analyticsTableWrap">
@@ -190,14 +225,19 @@ function SessionTable({
             <th>Tokens</th>
             <th>Cost</th>
             <th>Updated</th>
+            <th />
           </tr>
         </thead>
         <tbody>
           {sessions.slice(0, 80).map((session) => (
             <tr key={session.sessionId}>
               <td>
-                <strong title={session.sessionId}>{session.sessionId.slice(0, 8)}</strong>
-                {session.parentSessionId ? <small>parent {session.parentSessionId.slice(0, 8)}</small> : null}
+                <strong title={session.sessionId}>
+                  {session.sessionId.slice(0, 8)}
+                </strong>
+                {session.parentSessionId ? (
+                  <small>parent {session.parentSessionId.slice(0, 8)}</small>
+                ) : null}
               </td>
               <td title={session.projectPath}>{session.projectName}</td>
               <td>{session.model}</td>
@@ -206,6 +246,20 @@ function SessionTable({
               <td>
                 {formatDateTime(session.updatedAt, locale)}
                 <small>{formatDuration(session.durationSeconds, locale)}</small>
+              </td>
+              <td>
+                <button
+                  type="button"
+                  className="analyticsDeleteButton"
+                  disabled={deletingSessionId !== null}
+                  onClick={() => onDeleteSession(session)}
+                >
+                  {deletingSessionId === session.sessionId
+                    ? text.sessionDeleting
+                    : pendingDeleteSessionId === session.sessionId
+                      ? text.sessionDeleteConfirm
+                      : text.sessionDelete}
+                </button>
               </td>
             </tr>
           ))}
@@ -225,13 +279,17 @@ function TopPrompts({
   return (
     <div className="analyticsPromptList">
       {prompts.map((prompt, index) => (
-        <article key={`${prompt.sessionId}-${prompt.timestamp}-${index}`} className="analyticsPromptRow">
+        <article
+          key={`${prompt.sessionId}-${prompt.timestamp}-${index}`}
+          className="analyticsPromptRow"
+        >
           <div className="analyticsPromptRank">{index + 1}</div>
           <div className="analyticsPromptBody">
             <strong>{formatUsd(prompt.costUsd, locale)}</strong>
             <p title={prompt.promptPreview}>{prompt.promptPreview}</p>
             <span>
-              {prompt.projectName} · {prompt.model} · {formatNumber(prompt.total.totalTokens, locale)} tokens ·{" "}
+              {prompt.projectName} · {prompt.model} ·{" "}
+              {formatNumber(prompt.total.totalTokens, locale)} tokens ·{" "}
               {prompt.promptChars} chars
             </span>
           </div>
@@ -251,13 +309,22 @@ export function AnalyticsPanel({
   savingSettings,
   onRefresh,
   onExport,
+  onDeleteSession,
   onUpdateWeeklyBudget,
 }: AnalyticsPanelProps) {
   const { copy, locale } = useI18n();
   const text = copy.analytics;
   const budgetInputRef = useRef<HTMLInputElement | null>(null);
+  const deleteConfirmTimerRef = useRef<number | null>(null);
   const [sessionQuery, setSessionQuery] = useState("");
-  const budgetInputValue = weeklyBudgetUsd === null ? "" : String(weeklyBudgetUsd);
+  const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<
+    string | null
+  >(null);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
+    null,
+  );
+  const budgetInputValue =
+    weeklyBudgetUsd === null ? "" : String(weeklyBudgetUsd);
 
   const normalizedQuery = sessionQuery.trim().toLocaleLowerCase();
   const filteredSessions = useMemo(() => {
@@ -295,10 +362,56 @@ export function AnalyticsPanel({
     void onUpdateWeeklyBudget(null);
   };
 
+  const clearDeleteConfirmTimer = () => {
+    if (deleteConfirmTimerRef.current !== null) {
+      window.clearTimeout(deleteConfirmTimerRef.current);
+      deleteConfirmTimerRef.current = null;
+    }
+  };
+
+  const handleDeleteSession = (session: CodexSessionCostBreakdown) => {
+    if (deletingSessionId !== null) {
+      return;
+    }
+
+    if (pendingDeleteSessionId !== session.sessionId) {
+      clearDeleteConfirmTimer();
+      setPendingDeleteSessionId(session.sessionId);
+      deleteConfirmTimerRef.current = window.setTimeout(() => {
+        setPendingDeleteSessionId((current) =>
+          current === session.sessionId ? null : current,
+        );
+        deleteConfirmTimerRef.current = null;
+      }, 3_000);
+      return;
+    }
+
+    clearDeleteConfirmTimer();
+    setDeletingSessionId(session.sessionId);
+    void Promise.resolve(onDeleteSession(session))
+      .catch(() => {})
+      .finally(() => {
+        setPendingDeleteSessionId(null);
+        setDeletingSessionId(null);
+      });
+  };
+
+  useEffect(
+    () => () => {
+      if (deleteConfirmTimerRef.current !== null) {
+        window.clearTimeout(deleteConfirmTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const budgetPercent = analytics?.weeklyBudgetPercent ?? null;
   const hasData = analytics !== null && analytics.eventCount > 0;
   const showProgress = loading || progress !== null;
-  const progressPercent = Math.max(0, Math.min(100, Math.round(progress?.percent ?? (loading ? 6 : 0))));
+  const progressPercent = Math.max(
+    0,
+    Math.min(100, Math.round(progress?.percent ?? (loading ? 6 : 0))),
+  );
   const progressFiles =
     progress && progress.totalFiles > 0
       ? `${formatNumber(progress.processedFiles, locale)} / ${formatNumber(progress.totalFiles, locale)} ${text.sourceFiles}`
@@ -314,13 +427,28 @@ export function AnalyticsPanel({
             <p>{text.description}</p>
           </div>
           <div className="analyticsActions">
-            <button type="button" className="ghost" onClick={onRefresh} disabled={loading}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={onRefresh}
+              disabled={loading}
+            >
               {text.refresh}
             </button>
-            <button type="button" className="ghost" onClick={() => onExport("csv")} disabled={exporting !== null}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => onExport("csv")}
+              disabled={exporting !== null}
+            >
               {exporting === "csv" ? text.exporting : text.exportCsv}
             </button>
-            <button type="button" className="primary" onClick={() => onExport("json")} disabled={exporting !== null}>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => onExport("json")}
+              disabled={exporting !== null}
+            >
               {exporting === "json" ? text.exporting : text.exportJson}
             </button>
           </div>
@@ -339,29 +467,62 @@ export function AnalyticsPanel({
               <strong>{progressStageLabel(progress, text)}</strong>
               <span>{progressFiles}</span>
             </div>
-            <div className="analyticsProgressMeter" aria-label={`${progressPercent}%`}>
+            <div
+              className="analyticsProgressMeter"
+              aria-label={`${progressPercent}%`}
+            >
               <i style={{ width: `${progressPercent}%` }} />
             </div>
             <b>{progressPercent}%</b>
-            {progress?.currentPath ? <code title={progress.currentPath}>{progress.currentPath}</code> : null}
+            {progress?.currentPath ? (
+              <code title={progress.currentPath}>{progress.currentPath}</code>
+            ) : null}
           </section>
         ) : null}
 
         <section className="analyticsStats">
-          {statCard(text.totalCost, analytics ? formatUsd(analytics.totalCostUsd, locale) : "--", text.pricingEstimate)}
-          {statCard(text.last7dCost, analytics ? formatUsd(analytics.last7dCostUsd, locale) : "--", `${analytics?.weeklyBudgetPercent ?? 0}%`)}
-          {statCard(text.totalTokens, analytics ? formatNumber(analytics.total.totalTokens, locale) : "--", text.tokenEvents)}
-          {statCard(text.sessions, analytics ? formatNumber(analytics.sessions.length, locale) : "--", text.sourceFiles)}
+          {statCard(
+            text.totalCost,
+            analytics ? formatUsd(analytics.totalCostUsd, locale) : "--",
+            text.pricingEstimate,
+          )}
+          {statCard(
+            text.last7dCost,
+            analytics ? formatUsd(analytics.last7dCostUsd, locale) : "--",
+            `${analytics?.weeklyBudgetPercent ?? 0}%`,
+          )}
+          {statCard(
+            text.totalTokens,
+            analytics
+              ? formatNumber(analytics.total.totalTokens, locale)
+              : "--",
+            text.tokenEvents,
+          )}
+          {statCard(
+            text.sessions,
+            analytics ? formatNumber(analytics.sessions.length, locale) : "--",
+            text.sourceFiles,
+          )}
         </section>
 
-        <section className={`analyticsBudget tone-${analytics?.weeklyBudgetAlert ?? "none"}`}>
+        <section
+          className={`analyticsBudget tone-${analytics?.weeklyBudgetAlert ?? "none"}`}
+        >
           <div>
             <span>{text.budgetTitle}</span>
-            <strong>{analytics ? alertLabel(analytics.weeklyBudgetAlert, text) : text.budgetUnset}</strong>
+            <strong>
+              {analytics
+                ? alertLabel(analytics.weeklyBudgetAlert, text)
+                : text.budgetUnset}
+            </strong>
             <p>{text.budgetDescription}</p>
           </div>
           <div className="analyticsBudgetMeter" aria-hidden="true">
-            <i style={{ width: `${Math.min(100, Math.max(0, budgetPercent ?? 0))}%` }} />
+            <i
+              style={{
+                width: `${Math.min(100, Math.max(0, budgetPercent ?? 0))}%`,
+              }}
+            />
           </div>
           <label>
             <span>{text.budgetInputLabel}</span>
@@ -374,10 +535,20 @@ export function AnalyticsPanel({
             />
           </label>
           <div className="analyticsBudgetActions">
-            <button type="button" className="ghost" onClick={clearBudget} disabled={savingSettings}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={clearBudget}
+              disabled={savingSettings}
+            >
               {text.budgetClear}
             </button>
-            <button type="button" className="primary" onClick={saveBudget} disabled={savingSettings}>
+            <button
+              type="button"
+              className="primary"
+              onClick={saveBudget}
+              disabled={savingSettings}
+            >
               {text.budgetSave}
             </button>
           </div>
@@ -428,7 +599,14 @@ export function AnalyticsPanel({
                   onChange={(event) => setSessionQuery(event.target.value)}
                 />
               </div>
-              <SessionTable sessions={filteredSessions} locale={locale} />
+              <SessionTable
+                sessions={filteredSessions}
+                locale={locale}
+                text={text}
+                pendingDeleteSessionId={pendingDeleteSessionId}
+                deletingSessionId={deletingSessionId}
+                onDeleteSession={handleDeleteSession}
+              />
             </section>
 
             <section className="analyticsBlock analyticsBlockPrompts">
@@ -445,9 +623,15 @@ export function AnalyticsPanel({
 
         {analytics ? (
           <footer className="analyticsFoot">
-            <span>{text.updated}: {formatDateTime(analytics.updatedAt, locale)}</span>
-            <span>{text.sourceFiles}: {analytics.sourcePathCount}</span>
-            <span>{text.failedSources}: {analytics.failedPathCount}</span>
+            <span>
+              {text.updated}: {formatDateTime(analytics.updatedAt, locale)}
+            </span>
+            <span>
+              {text.sourceFiles}: {analytics.sourcePathCount}
+            </span>
+            <span>
+              {text.failedSources}: {analytics.failedPathCount}
+            </span>
             <span>{analytics.pricingSource}</span>
           </footer>
         ) : null}

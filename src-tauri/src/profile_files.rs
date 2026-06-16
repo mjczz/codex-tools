@@ -315,9 +315,6 @@ pub(crate) fn normalize_relay_api_key(api_key: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("请输入 API Key。".to_string());
     }
-    if !trimmed.starts_with("sk-") {
-        return Err("仅支持 OpenAI 格式 API Key，例如 sk-...".to_string());
-    }
     Ok(trimmed.to_string())
 }
 

@@ -4,7 +4,13 @@ import koKrRaw from "./locales/ko-KR.json";
 import ruRuRaw from "./locales/ru-RU.json";
 import zhCnRaw from "./locales/zh-CN.json";
 
-export const SUPPORTED_LOCALES = ["zh-CN", "en-US", "ja-JP", "ko-KR", "ru-RU"] as const;
+export const SUPPORTED_LOCALES = [
+  "zh-CN",
+  "en-US",
+  "ja-JP",
+  "ko-KR",
+  "ru-RU",
+] as const;
 
 export type AppLocale = (typeof SUPPORTED_LOCALES)[number];
 
@@ -24,7 +30,9 @@ export const LOCALE_OPTIONS: LocaleOption[] = [
 
 export const DEFAULT_LOCALE: AppLocale = "zh-CN";
 
-export function isSupportedLocale(value: string | null | undefined): value is AppLocale {
+export function isSupportedLocale(
+  value: string | null | undefined,
+): value is AppLocale {
   return (
     value === "zh-CN" ||
     value === "en-US" ||
@@ -121,6 +129,9 @@ export type MessageCatalog = {
     apiValidationTitle: string;
     apiValidationDescription: string;
     apiValidationFailed: string;
+    apiTestConnection: string;
+    apiTestingConnection: string;
+    apiTestSucceeded: string;
     apiValidateAndSave: string;
     apiSaving: string;
     apiForceSave: string;
@@ -229,6 +240,9 @@ export type MessageCatalog = {
     duration: string;
     promptPreview: string;
     promptChars: string;
+    sessionDelete: string;
+    sessionDeleteConfirm: string;
+    sessionDeleting: string;
   };
   apiProxy: {
     kicker: string;
@@ -607,13 +621,21 @@ export type MessageCatalog = {
     fileImportPrefix: string;
     importFilesRequired: string;
     importFailedPlain: (prefix: string, error: string) => string;
-    importFailedWithSource: (prefix: string, source: string, error: string) => string;
+    importFailedWithSource: (
+      prefix: string,
+      source: string,
+      error: string,
+    ) => string;
     importFailedNoValidJson: (prefix: string) => string;
     importSummaryAdded: (count: number) => string;
     importSummaryUpdated: (count: number) => string;
     importSummaryFailed: (count: number) => string;
     importSummaryFirstFailure: (source: string, error: string) => string;
-    importSummaryDone: (prefix: string, summary: string, suffix: string) => string;
+    importSummaryDone: (
+      prefix: string,
+      summary: string,
+      suffix: string,
+    ) => string;
     proxyLocalTargetFallback: string;
     proxyStarted: (target: string) => string;
     proxyStartFailed: (error: string) => string;
@@ -629,6 +651,8 @@ export type MessageCatalog = {
     apiProxyUsageClearFailed: (error: string) => string;
     codexAnalyticsExported: string;
     codexAnalyticsExportFailed: (error: string) => string;
+    codexSessionDeleted: (sessionId: string) => string;
+    codexSessionDeleteFailed: (error: string) => string;
     installingDependency: (name: string) => string;
     dependencyInstalled: (name: string) => string;
     dependencyInstallFailed: (name: string, error: string) => string;
@@ -659,11 +683,17 @@ type Rawify<T> = T extends (...args: infer _Args) => string
 
 type RawMessageCatalog = Rawify<MessageCatalog>;
 
-function fillTemplate(template: string, values: Record<string, string | number>): string {
-  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key: string) => {
-    const value = values[key];
-    return value === undefined ? "" : String(value);
-  });
+function fillTemplate(
+  template: string,
+  values: Record<string, string | number>,
+): string {
+  return template.replace(
+    /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g,
+    (_, key: string) => {
+      const value = values[key];
+      return value === undefined ? "" : String(value);
+    },
+  );
 }
 
 function compileLocale(raw: RawMessageCatalog): MessageCatalog {
@@ -671,7 +701,8 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
     common: raw.common,
     topBar: {
       ...raw.topBar,
-      toggleLanguage: (nextLanguage) => fillTemplate(raw.topBar.toggleLanguage, { nextLanguage }),
+      toggleLanguage: (nextLanguage) =>
+        fillTemplate(raw.topBar.toggleLanguage, { nextLanguage }),
     },
     metaStrip: raw.metaStrip,
     addAccount: {
@@ -684,7 +715,8 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
           count,
           remainingCount: Math.max(count - 1, 0),
         }),
-      uploadSelectedCount: (count) => fillTemplate(raw.addAccount.uploadSelectedCount, { count }),
+      uploadSelectedCount: (count) =>
+        fillTemplate(raw.addAccount.uploadSelectedCount, { count }),
     },
     accountCard: raw.accountCard,
     accountsGrid: raw.accountsGrid,
@@ -703,32 +735,41 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
       title: (version) => fillTemplate(raw.updateDialog.title, { version }),
       subtitle: (currentVersion) =>
         fillTemplate(raw.updateDialog.subtitle, { currentVersion }),
-      publishedAt: (date) => fillTemplate(raw.updateDialog.publishedAt, { date }),
+      publishedAt: (date) =>
+        fillTemplate(raw.updateDialog.publishedAt, { date }),
     },
     notices: {
       ...raw.notices,
-      updateSettingsFailed: (error) => fillTemplate(raw.notices.updateSettingsFailed, { error }),
-      refreshFailed: (error) => fillTemplate(raw.notices.refreshFailed, { error }),
-      reloginRequired: (label) => fillTemplate(raw.notices.reloginRequired, { label }),
+      updateSettingsFailed: (error) =>
+        fillTemplate(raw.notices.updateSettingsFailed, { error }),
+      refreshFailed: (error) =>
+        fillTemplate(raw.notices.refreshFailed, { error }),
+      reloginRequired: (label) =>
+        fillTemplate(raw.notices.reloginRequired, { label }),
       updateDownloadingPercent: (percent) =>
         fillTemplate(raw.notices.updateDownloadingPercent, { percent }),
-      updateInstallFailed: (error) => fillTemplate(raw.notices.updateInstallFailed, { error }),
+      updateInstallFailed: (error) =>
+        fillTemplate(raw.notices.updateInstallFailed, { error }),
       foundNewVersion: (version, currentVersion) =>
         fillTemplate(raw.notices.foundNewVersion, { version, currentVersion }),
-      updateCheckFailed: (error) => fillTemplate(raw.notices.updateCheckFailed, { error }),
-      openExternalFailed: (error) => fillTemplate(raw.notices.openExternalFailed, { error }),
+      updateCheckFailed: (error) =>
+        fillTemplate(raw.notices.updateCheckFailed, { error }),
+      openExternalFailed: (error) =>
+        fillTemplate(raw.notices.openExternalFailed, { error }),
       openManualDownloadFailed: (error) =>
         fillTemplate(raw.notices.openManualDownloadFailed, { error }),
       oauthLinkPrepareFailed: (error) =>
         fillTemplate(raw.notices.oauthLinkPrepareFailed, { error }),
       currentAccountImportFailed: (error) =>
         fillTemplate(raw.notices.currentAccountImportFailed, { error }),
-      apiAccountCreated: (label) => fillTemplate(raw.notices.apiAccountCreated, { label }),
+      apiAccountCreated: (label) =>
+        fillTemplate(raw.notices.apiAccountCreated, { label }),
       apiAccountCreateFailed: (error) =>
         fillTemplate(raw.notices.apiAccountCreateFailed, { error }),
       profileIntegrityWarning: (count) =>
         fillTemplate(raw.notices.profileIntegrityWarning, { count }),
-      accountAliasUpdated: (label) => fillTemplate(raw.notices.accountAliasUpdated, { label }),
+      accountAliasUpdated: (label) =>
+        fillTemplate(raw.notices.accountAliasUpdated, { label }),
       accountAliasUpdateFailed: (error) =>
         fillTemplate(raw.notices.accountAliasUpdateFailed, { error }),
       accountApiProxyEnabled: (label) =>
@@ -739,11 +780,14 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.accountApiProxyToggleFailed, { error }),
       accountsExportFailed: (error) =>
         fillTemplate(raw.notices.accountsExportFailed, { error }),
-      deleteConfirm: (label) => fillTemplate(raw.notices.deleteConfirm, { label }),
-      deleteFailed: (error) => fillTemplate(raw.notices.deleteFailed, { error }),
+      deleteConfirm: (label) =>
+        fillTemplate(raw.notices.deleteConfirm, { label }),
+      deleteFailed: (error) =>
+        fillTemplate(raw.notices.deleteFailed, { error }),
       opencodeSyncFailed: (base, error) =>
         fillTemplate(raw.notices.opencodeSyncFailed, { base, error }),
-      opencodeSynced: (base) => fillTemplate(raw.notices.opencodeSynced, { base }),
+      opencodeSynced: (base) =>
+        fillTemplate(raw.notices.opencodeSynced, { base }),
       opencodeDesktopRestartFailed: (base, error) =>
         fillTemplate(raw.notices.opencodeDesktopRestartFailed, { base, error }),
       opencodeDesktopRestarted: (base) =>
@@ -752,24 +796,40 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.editorRestartFailed, { base, error }),
       editorsRestarted: (base, labels) =>
         fillTemplate(raw.notices.editorsRestarted, { base, labels }),
-      noEditorRestarted: (base) => fillTemplate(raw.notices.noEditorRestarted, { base }),
-      switchFailed: (error) => fillTemplate(raw.notices.switchFailed, { error }),
+      noEditorRestarted: (base) =>
+        fillTemplate(raw.notices.noEditorRestarted, { base }),
+      switchFailed: (error) =>
+        fillTemplate(raw.notices.switchFailed, { error }),
       importFailedPlain: (prefix, error) =>
         fillTemplate(raw.notices.importFailedPlain, { prefix, error }),
       importFailedWithSource: (prefix, source, error) =>
-        fillTemplate(raw.notices.importFailedWithSource, { prefix, source, error }),
+        fillTemplate(raw.notices.importFailedWithSource, {
+          prefix,
+          source,
+          error,
+        }),
       importFailedNoValidJson: (prefix) =>
         fillTemplate(raw.notices.importFailedNoValidJson, { prefix }),
-      importSummaryAdded: (count) => fillTemplate(raw.notices.importSummaryAdded, { count }),
-      importSummaryUpdated: (count) => fillTemplate(raw.notices.importSummaryUpdated, { count }),
-      importSummaryFailed: (count) => fillTemplate(raw.notices.importSummaryFailed, { count }),
+      importSummaryAdded: (count) =>
+        fillTemplate(raw.notices.importSummaryAdded, { count }),
+      importSummaryUpdated: (count) =>
+        fillTemplate(raw.notices.importSummaryUpdated, { count }),
+      importSummaryFailed: (count) =>
+        fillTemplate(raw.notices.importSummaryFailed, { count }),
       importSummaryFirstFailure: (source, error) =>
         fillTemplate(raw.notices.importSummaryFirstFailure, { source, error }),
       importSummaryDone: (prefix, summary, suffix) =>
-        fillTemplate(raw.notices.importSummaryDone, { prefix, summary, suffix }).trim(),
-      proxyStarted: (target) => fillTemplate(raw.notices.proxyStarted, { target }),
-      proxyStartFailed: (error) => fillTemplate(raw.notices.proxyStartFailed, { error }),
-      proxyStopFailed: (error) => fillTemplate(raw.notices.proxyStopFailed, { error }),
+        fillTemplate(raw.notices.importSummaryDone, {
+          prefix,
+          summary,
+          suffix,
+        }).trim(),
+      proxyStarted: (target) =>
+        fillTemplate(raw.notices.proxyStarted, { target }),
+      proxyStartFailed: (error) =>
+        fillTemplate(raw.notices.proxyStartFailed, { error }),
+      proxyStopFailed: (error) =>
+        fillTemplate(raw.notices.proxyStopFailed, { error }),
       proxyKeyRefreshFailed: (error) =>
         fillTemplate(raw.notices.proxyKeyRefreshFailed, { error }),
       codexProxyBindFailed: (error) =>
@@ -780,6 +840,10 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.apiProxyUsageClearFailed, { error }),
       codexAnalyticsExportFailed: (error) =>
         fillTemplate(raw.notices.codexAnalyticsExportFailed, { error }),
+      codexSessionDeleted: (sessionId) =>
+        fillTemplate(raw.notices.codexSessionDeleted, { sessionId }),
+      codexSessionDeleteFailed: (error) =>
+        fillTemplate(raw.notices.codexSessionDeleteFailed, { error }),
       installingDependency: (name) =>
         fillTemplate(raw.notices.installingDependency, { name }),
       dependencyInstalled: (name) =>
@@ -788,13 +852,16 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.dependencyInstallFailed, { name, error }),
       remoteStatusFailed: (label, error) =>
         fillTemplate(raw.notices.remoteStatusFailed, { label, error }),
-      remoteProxyDeployed: (label) => fillTemplate(raw.notices.remoteProxyDeployed, { label }),
+      remoteProxyDeployed: (label) =>
+        fillTemplate(raw.notices.remoteProxyDeployed, { label }),
       remoteProxyDeployFailed: (label, error) =>
         fillTemplate(raw.notices.remoteProxyDeployFailed, { label, error }),
-      remoteProxyStarted: (label) => fillTemplate(raw.notices.remoteProxyStarted, { label }),
+      remoteProxyStarted: (label) =>
+        fillTemplate(raw.notices.remoteProxyStarted, { label }),
       remoteProxyStartFailed: (label, error) =>
         fillTemplate(raw.notices.remoteProxyStartFailed, { label, error }),
-      remoteProxyStopped: (label) => fillTemplate(raw.notices.remoteProxyStopped, { label }),
+      remoteProxyStopped: (label) =>
+        fillTemplate(raw.notices.remoteProxyStopped, { label }),
       remoteProxyStopFailed: (label, error) =>
         fillTemplate(raw.notices.remoteProxyStopFailed, { label, error }),
       remoteLogsFailed: (label, error) =>
@@ -803,7 +870,8 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.pickIdentityFileFailed, { error }),
       cloudflaredInstallFailed: (error) =>
         fillTemplate(raw.notices.cloudflaredInstallFailed, { error }),
-      cloudflaredStarted: (target) => fillTemplate(raw.notices.cloudflaredStarted, { target }),
+      cloudflaredStarted: (target) =>
+        fillTemplate(raw.notices.cloudflaredStarted, { target }),
       cloudflaredStartFailed: (error) =>
         fillTemplate(raw.notices.cloudflaredStartFailed, { error }),
       cloudflaredStopFailed: (error) =>

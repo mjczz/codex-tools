@@ -217,6 +217,30 @@ pub(crate) struct CreateApiAccountInput {
     pub(crate) force_save: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TestApiAccountConnectionInput {
+    pub(crate) label: String,
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
+    pub(crate) model_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TestApiAccountConnectionResult {
+    pub(crate) ok: bool,
+    pub(crate) balance_text: Option<String>,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteCodexSessionResult {
+    pub(crate) session_id: String,
+    pub(crate) deleted_path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportAccountFailure {

@@ -24,6 +24,7 @@ import type {
   CodexTokenUsageSnapshot,
   CreateApiProxyKeyInput,
   CreateApiAccountInput,
+  DeleteCodexSessionResult,
   ImportAccountsResult,
   InstalledEditorApp,
   Notice,
@@ -35,10 +36,15 @@ import type {
   RemoteServerConfig,
   StartCloudflaredTunnelInput,
   SwitchAccountResult,
+  TestApiAccountConnectionInput,
+  TestApiAccountConnectionResult,
   UpdateApiProxyKeyInput,
   UpdateSettingsOptions,
 } from "../types/app";
-import { pickBestSmartSwitchAccount, sortAccountsByRemaining } from "../utils/accountRanking";
+import {
+  pickBestSmartSwitchAccount,
+  sortAccountsByRemaining,
+} from "../utils/accountRanking";
 import { getLatestChangelogEntry } from "../utils/changelog";
 
 const REFRESH_MS = 30_000;
@@ -119,7 +125,11 @@ function buildImportNotice(
     if (firstFailure) {
       return {
         type: "error",
-        message: notices.importFailedWithSource(prefix, firstFailure.source, firstFailure.error),
+        message: notices.importFailedWithSource(
+          prefix,
+          firstFailure.source,
+          firstFailure.error,
+        ),
       };
     }
     return {
@@ -141,7 +151,10 @@ function buildImportNotice(
 
   const suffix =
     failureCount > 0 && firstFailure
-      ? notices.importSummaryFirstFailure(firstFailure.source, firstFailure.error)
+      ? notices.importSummaryFirstFailure(
+          firstFailure.source,
+          firstFailure.error,
+        )
       : "";
   const listFormatter = new Intl.ListFormat(locale, {
     style: "short",
@@ -150,7 +163,11 @@ function buildImportNotice(
 
   return {
     type: failureCount > 0 ? "info" : "ok",
-    message: notices.importSummaryDone(prefix, listFormatter.format(segments), suffix),
+    message: notices.importSummaryDone(
+      prefix,
+      listFormatter.format(segments),
+      suffix,
+    ),
   };
 }
 
@@ -174,68 +191,108 @@ function buildRemoteProxyFallback(
 export function useCodexController() {
   const { copy, locale } = useI18n();
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
-  const [tokenUsage, setTokenUsage] = useState<CodexTokenUsageSnapshot | null>(null);
+  const [tokenUsage, setTokenUsage] = useState<CodexTokenUsageSnapshot | null>(
+    null,
+  );
   const [tokenUsageError, setTokenUsageError] = useState<string | null>(null);
-  const [costAnalytics, setCostAnalytics] = useState<CodexCostAnalyticsSnapshot | null>(null);
-  const [costAnalyticsError, setCostAnalyticsError] = useState<string | null>(null);
+  const [costAnalytics, setCostAnalytics] =
+    useState<CodexCostAnalyticsSnapshot | null>(null);
+  const [costAnalyticsError, setCostAnalyticsError] = useState<string | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshingTokenUsage, setRefreshingTokenUsage] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [reauthorizeAccount, setReauthorizeAccount] = useState<AccountSummary | null>(null);
+  const [reauthorizeAccount, setReauthorizeAccount] =
+    useState<AccountSummary | null>(null);
   const [importingAccounts, setImportingAccounts] = useState(false);
   const [oauthWaitingForCallback, setOauthWaitingForCallback] = useState(false);
   const [exportingAccounts, setExportingAccounts] = useState(false);
-  const [apiProxyStatus, setApiProxyStatus] = useState<ApiProxyStatus>(DEFAULT_API_PROXY_STATUS);
+  const [apiProxyStatus, setApiProxyStatus] = useState<ApiProxyStatus>(
+    DEFAULT_API_PROXY_STATUS,
+  );
   const [apiProxyKeys, setApiProxyKeys] = useState<ApiProxyKey[]>([]);
-  const [apiProxyKeyLogs, setApiProxyKeyLogs] = useState<ApiProxyKeyUsageLogEntry[]>([]);
+  const [apiProxyKeyLogs, setApiProxyKeyLogs] = useState<
+    ApiProxyKeyUsageLogEntry[]
+  >([]);
   const [apiProxyKeysLoading, setApiProxyKeysLoading] = useState(true);
-  const [apiProxySupportedModels, setApiProxySupportedModels] = useState<string[]>([]);
-  const [apiProxyUsageStats, setApiProxyUsageStats] = useState<ApiProxyUsageStats | null>(null);
+  const [apiProxySupportedModels, setApiProxySupportedModels] = useState<
+    string[]
+  >([]);
+  const [apiProxyUsageStats, setApiProxyUsageStats] =
+    useState<ApiProxyUsageStats | null>(null);
   const [apiProxyUsageLoading, setApiProxyUsageLoading] = useState(true);
   const [apiProxyUsageClearing, setApiProxyUsageClearing] = useState(false);
   const [costAnalyticsLoading, setCostAnalyticsLoading] = useState(true);
-  const [costAnalyticsExporting, setCostAnalyticsExporting] = useState<"csv" | "json" | null>(null);
-  const [costAnalyticsProgress, setCostAnalyticsProgress] = useState<CodexCostAnalyticsProgress | null>(null);
+  const [costAnalyticsExporting, setCostAnalyticsExporting] = useState<
+    "csv" | "json" | null
+  >(null);
+  const [costAnalyticsProgress, setCostAnalyticsProgress] =
+    useState<CodexCostAnalyticsProgress | null>(null);
   const costAnalyticsRefreshInFlightRef = useRef(false);
-  const [apiProxyUsageRange, setApiProxyUsageRange] = useState<ApiProxyUsageRange>(
-    DEFAULT_API_PROXY_USAGE_RANGE,
+  const [apiProxyUsageRange, setApiProxyUsageRange] =
+    useState<ApiProxyUsageRange>(DEFAULT_API_PROXY_USAGE_RANGE);
+  const [apiProxyUsageMetric, setApiProxyUsageMetric] =
+    useState<ApiProxyUsageMetric>(DEFAULT_API_PROXY_USAGE_METRIC);
+  const [cloudflaredStatus, setCloudflaredStatus] = useState<CloudflaredStatus>(
+    DEFAULT_CLOUDFLARED_STATUS,
   );
-  const [apiProxyUsageMetric, setApiProxyUsageMetric] = useState<ApiProxyUsageMetric>(
-    DEFAULT_API_PROXY_USAGE_METRIC,
-  );
-  const [cloudflaredStatus, setCloudflaredStatus] = useState<CloudflaredStatus>(DEFAULT_CLOUDFLARED_STATUS);
-  const [remoteProxyStatusesRaw, setRemoteProxyStatusesRaw] = useState<Record<string, RemoteProxyStatus>>({});
-  const [remoteProxyLogs, setRemoteProxyLogs] = useState<Record<string, string>>({});
-  const [remoteDeployProgress, setRemoteDeployProgress] = useState<RemoteDeployProgress | null>(null);
+  const [remoteProxyStatusesRaw, setRemoteProxyStatusesRaw] = useState<
+    Record<string, RemoteProxyStatus>
+  >({});
+  const [remoteProxyLogs, setRemoteProxyLogs] = useState<
+    Record<string, string>
+  >({});
+  const [remoteDeployProgress, setRemoteDeployProgress] =
+    useState<RemoteDeployProgress | null>(null);
   const [startingApiProxy, setStartingApiProxy] = useState(false);
   const [stoppingApiProxy, setStoppingApiProxy] = useState(false);
   const [refreshingApiProxyKey, setRefreshingApiProxyKey] = useState(false);
   const [bindingCodexProxy, setBindingCodexProxy] = useState(false);
   const [restoringCodexProxy, setRestoringCodexProxy] = useState(false);
   const [savingApiProxyKey, setSavingApiProxyKey] = useState(false);
-  const [refreshingRemoteProxyId, setRefreshingRemoteProxyId] = useState<string | null>(null);
-  const [deployingRemoteProxyId, setDeployingRemoteProxyId] = useState<string | null>(null);
-  const [startingRemoteProxyId, setStartingRemoteProxyId] = useState<string | null>(null);
-  const [stoppingRemoteProxyId, setStoppingRemoteProxyId] = useState<string | null>(null);
-  const [readingRemoteLogsId, setReadingRemoteLogsId] = useState<string | null>(null);
-  const [installingDependencyName, setInstallingDependencyName] = useState<string | null>(null);
-  const [installingDependencyTargetId, setInstallingDependencyTargetId] = useState<string | null>(null);
+  const [refreshingRemoteProxyId, setRefreshingRemoteProxyId] = useState<
+    string | null
+  >(null);
+  const [deployingRemoteProxyId, setDeployingRemoteProxyId] = useState<
+    string | null
+  >(null);
+  const [startingRemoteProxyId, setStartingRemoteProxyId] = useState<
+    string | null
+  >(null);
+  const [stoppingRemoteProxyId, setStoppingRemoteProxyId] = useState<
+    string | null
+  >(null);
+  const [readingRemoteLogsId, setReadingRemoteLogsId] = useState<string | null>(
+    null,
+  );
+  const [installingDependencyName, setInstallingDependencyName] = useState<
+    string | null
+  >(null);
+  const [installingDependencyTargetId, setInstallingDependencyTargetId] =
+    useState<string | null>(null);
   const [installingCloudflared, setInstallingCloudflared] = useState(false);
   const [startingCloudflared, setStartingCloudflared] = useState(false);
   const [stoppingCloudflared, setStoppingCloudflared] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
-  const [renamingAccountId, setRenamingAccountId] = useState<string | null>(null);
+  const [renamingAccountId, setRenamingAccountId] = useState<string | null>(
+    null,
+  );
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<string | null>(null);
-  const [pendingUpdate, setPendingUpdate] = useState<PendingUpdateInfo | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<PendingUpdateInfo | null>(
+    null,
+  );
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [installedEditorApps, setInstalledEditorApps] = useState<InstalledEditorApp[]>([]);
+  const [installedEditorApps, setInstalledEditorApps] = useState<
+    InstalledEditorApp[]
+  >([]);
   const [hasOpencodeDesktopApp, setHasOpencodeDesktopApp] = useState(false);
   const installingUpdateRef = useRef(false);
   const deleteConfirmTimerRef = useRef<number | null>(null);
@@ -246,7 +303,10 @@ export function useCodexController() {
   const reloginPromptedAccountKeysRef = useRef<Set<string>>(new Set());
   const profileIntegrityPromptedRef = useRef(false);
 
-  const sortedAccounts = useMemo(() => sortAccountsByRemaining(accounts), [accounts]);
+  const sortedAccounts = useMemo(
+    () => sortAccountsByRemaining(accounts),
+    [accounts],
+  );
 
   const localizeError = useCallback(
     (error: string) => localizeBackendError(error, locale),
@@ -257,8 +317,12 @@ export function useCodexController() {
     (items: AccountSummary[]) =>
       items.map((account) => ({
         ...account,
-        usageError: account.usageError ? localizeError(account.usageError) : null,
-        authRefreshError: account.authRefreshError ? localizeError(account.authRefreshError) : null,
+        usageError: account.usageError
+          ? localizeError(account.usageError)
+          : null,
+        authRefreshError: account.authRefreshError
+          ? localizeError(account.authRefreshError)
+          : null,
         profileIntegrityError: account.profileIntegrityError
           ? localizeError(account.profileIntegrityError)
           : null,
@@ -276,7 +340,9 @@ export function useCodexController() {
 
       const activeBlockedKeys = new Set(
         localized
-          .filter((account) => account.authRefreshBlocked && account.authRefreshError)
+          .filter(
+            (account) => account.authRefreshBlocked && account.authRefreshError,
+          )
           .map((account) => account.accountKey),
       );
       reloginPromptedAccountKeysRef.current.forEach((accountKey) => {
@@ -366,7 +432,9 @@ export function useCodexController() {
       if (profileIntegrityPromptedRef.current) {
         return;
       }
-      const incompleteCount = items.filter((account) => account.profileIntegrityError).length;
+      const incompleteCount = items.filter(
+        (account) => account.profileIntegrityError,
+      ).length;
       if (incompleteCount <= 0) {
         return;
       }
@@ -387,7 +455,9 @@ export function useCodexController() {
 
   const loadInstalledEditorApps = useCallback(async () => {
     try {
-      const data = await invoke<InstalledEditorApp[]>("list_installed_editor_apps");
+      const data = await invoke<InstalledEditorApp[]>(
+        "list_installed_editor_apps",
+      );
       setInstalledEditorApps(data);
     } catch {
       setInstalledEditorApps([]);
@@ -396,7 +466,9 @@ export function useCodexController() {
 
   const loadOpencodeDesktopAppInstalled = useCallback(async () => {
     try {
-      const installed = await invoke<boolean>("is_opencode_desktop_app_installed");
+      const installed = await invoke<boolean>(
+        "is_opencode_desktop_app_installed",
+      );
       setHasOpencodeDesktopApp(installed);
     } catch {
       setHasOpencodeDesktopApp(false);
@@ -424,18 +496,24 @@ export function useCodexController() {
     }
   }, []);
 
-  const loadApiProxyKeyLogs = useCallback(async (options?: { silent?: boolean }) => {
-    try {
-      const data = await invoke<ApiProxyKeyUsageLogEntry[]>("get_api_proxy_key_usage_logs", {
-        limit: 200,
-      });
-      setApiProxyKeyLogs(Array.isArray(data) ? data : []);
-    } catch {
-      if (options?.silent !== true) {
-        setApiProxyKeyLogs([]);
+  const loadApiProxyKeyLogs = useCallback(
+    async (options?: { silent?: boolean }) => {
+      try {
+        const data = await invoke<ApiProxyKeyUsageLogEntry[]>(
+          "get_api_proxy_key_usage_logs",
+          {
+            limit: 200,
+          },
+        );
+        setApiProxyKeyLogs(Array.isArray(data) ? data : []);
+      } catch {
+        if (options?.silent !== true) {
+          setApiProxyKeyLogs([]);
+        }
       }
-    }
-  }, []);
+    },
+    [],
+  );
 
   const loadApiProxySupportedModels = useCallback(async () => {
     try {
@@ -462,9 +540,12 @@ export function useCodexController() {
       const requestId = ++apiProxyUsageLoadSeqRef.current;
 
       try {
-        const data = await invoke<ApiProxyUsageStats>("get_api_proxy_usage_stats", {
-          rangeSeconds: API_PROXY_USAGE_RANGE_SECONDS[range],
-        });
+        const data = await invoke<ApiProxyUsageStats>(
+          "get_api_proxy_usage_stats",
+          {
+            rangeSeconds: API_PROXY_USAGE_RANGE_SECONDS[range],
+          },
+        );
         if (requestId !== apiProxyUsageLoadSeqRef.current) {
           return;
         }
@@ -502,7 +583,9 @@ export function useCodexController() {
         }
 
         try {
-          const data = await invoke<AppSettings>("update_app_settings", { patch });
+          const data = await invoke<AppSettings>("update_app_settings", {
+            patch,
+          });
           settingsRef.current = data;
           setSettings(data);
           if (!options?.silent) {
@@ -511,7 +594,9 @@ export function useCodexController() {
         } catch (error) {
           setNotice({
             type: "error",
-            message: copy.notices.updateSettingsFailed(localizeError(String(error))),
+            message: copy.notices.updateSettingsFailed(
+              localizeError(String(error)),
+            ),
           });
         } finally {
           if (shouldLockUi) {
@@ -530,138 +615,194 @@ export function useCodexController() {
     [copy.notices, localizeError],
   );
 
-  const refreshUsage = useCallback(async (quiet = false) => {
-    try {
-      if (!quiet) {
-        setRefreshing(true);
+  const refreshUsage = useCallback(
+    async (quiet = false) => {
+      try {
+        if (!quiet) {
+          setRefreshing(true);
+        }
+        const data = await invoke<AccountSummary[]>("refresh_all_usage", {
+          forceAuthRefresh: !quiet,
+        });
+        const promptedRelogin = applyAccounts(data);
+        if (!quiet && !promptedRelogin) {
+          setNotice({ type: "ok", message: copy.notices.usageRefreshed });
+        }
+      } catch (error) {
+        if (!quiet) {
+          setNotice({
+            type: "error",
+            message: copy.notices.refreshFailed(localizeError(String(error))),
+          });
+        }
+      } finally {
+        if (!quiet) {
+          setRefreshing(false);
+        }
       }
-      const data = await invoke<AccountSummary[]>("refresh_all_usage", {
-        forceAuthRefresh: !quiet,
+    },
+    [applyAccounts, copy.notices, localizeError],
+  );
+
+  const refreshTokenUsage = useCallback(
+    async (quiet = false) => {
+      try {
+        if (!quiet) {
+          setRefreshingTokenUsage(true);
+        }
+        const data = await invoke<CodexTokenUsageSnapshot>(
+          "get_codex_token_usage",
+        );
+        setTokenUsage(data);
+        setTokenUsageError(null);
+      } catch (error) {
+        const localized = localizeError(String(error));
+        setTokenUsageError(localized);
+        if (!quiet) {
+          setNotice({
+            type: "error",
+            message: copy.notices.refreshFailed(localized),
+          });
+        }
+      } finally {
+        if (!quiet) {
+          setRefreshingTokenUsage(false);
+        }
+      }
+    },
+    [copy.notices, localizeError],
+  );
+
+  const loadCostAnalytics = useCallback(
+    async (quiet = false) => {
+      try {
+        if (!quiet) {
+          setCostAnalyticsLoading(true);
+        }
+        const data = await invoke<CodexCostAnalyticsSnapshot | null>(
+          "get_cached_codex_cost_analytics",
+        );
+        if (data) {
+          setCostAnalytics(data);
+          setCostAnalyticsError(null);
+        }
+        return data;
+      } catch (error) {
+        const localized = localizeError(String(error));
+        setCostAnalyticsError(localized);
+        if (!quiet) {
+          setNotice({
+            type: "error",
+            message: copy.notices.refreshFailed(localized),
+          });
+        }
+        return null;
+      } finally {
+        if (!costAnalyticsRefreshInFlightRef.current) {
+          setCostAnalyticsLoading(false);
+        }
+      }
+    },
+    [copy.notices, localizeError],
+  );
+
+  const refreshCostAnalytics = useCallback(
+    async (quiet = false) => {
+      costAnalyticsRefreshInFlightRef.current = true;
+      setCostAnalyticsLoading(true);
+      setCostAnalyticsProgress({
+        stage: "scanning",
+        processedFiles: 0,
+        totalFiles: 0,
+        percent: 0,
+        currentPath: null,
       });
-      const promptedRelogin = applyAccounts(data);
-      if (!quiet && !promptedRelogin) {
-        setNotice({ type: "ok", message: copy.notices.usageRefreshed });
-      }
-    } catch (error) {
-      if (!quiet) {
-        setNotice({
-          type: "error",
-          message: copy.notices.refreshFailed(localizeError(String(error))),
-        });
-      }
-    } finally {
-      if (!quiet) {
-        setRefreshing(false);
-      }
-    }
-  }, [applyAccounts, copy.notices, localizeError]);
-
-  const refreshTokenUsage = useCallback(async (quiet = false) => {
-    try {
-      if (!quiet) {
-        setRefreshingTokenUsage(true);
-      }
-      const data = await invoke<CodexTokenUsageSnapshot>("get_codex_token_usage");
-      setTokenUsage(data);
-      setTokenUsageError(null);
-    } catch (error) {
-      const localized = localizeError(String(error));
-      setTokenUsageError(localized);
-      if (!quiet) {
-        setNotice({
-          type: "error",
-          message: copy.notices.refreshFailed(localized),
-        });
-      }
-    } finally {
-      if (!quiet) {
-        setRefreshingTokenUsage(false);
-      }
-    }
-  }, [copy.notices, localizeError]);
-
-  const loadCostAnalytics = useCallback(async (quiet = false) => {
-    try {
-      if (!quiet) {
-        setCostAnalyticsLoading(true);
-      }
-      const data = await invoke<CodexCostAnalyticsSnapshot | null>("get_cached_codex_cost_analytics");
-      if (data) {
+      try {
+        const data = await invoke<CodexCostAnalyticsSnapshot>(
+          "refresh_codex_cost_analytics",
+        );
         setCostAnalytics(data);
         setCostAnalyticsError(null);
-      }
-      return data;
-    } catch (error) {
-      const localized = localizeError(String(error));
-      setCostAnalyticsError(localized);
-      if (!quiet) {
-        setNotice({
-          type: "error",
-          message: copy.notices.refreshFailed(localized),
-        });
-      }
-      return null;
-    } finally {
-      if (!costAnalyticsRefreshInFlightRef.current) {
+        return data;
+      } catch (error) {
+        const localized = localizeError(String(error));
+        setCostAnalyticsError(localized);
+        if (!quiet) {
+          setNotice({
+            type: "error",
+            message: copy.notices.refreshFailed(localized),
+          });
+        }
+        return null;
+      } finally {
+        costAnalyticsRefreshInFlightRef.current = false;
         setCostAnalyticsLoading(false);
+        window.setTimeout(() => setCostAnalyticsProgress(null), 600);
       }
-    }
-  }, [copy.notices, localizeError]);
+    },
+    [copy.notices, localizeError],
+  );
 
-  const refreshCostAnalytics = useCallback(async (quiet = false) => {
-    costAnalyticsRefreshInFlightRef.current = true;
-    setCostAnalyticsLoading(true);
-    setCostAnalyticsProgress({
-      stage: "scanning",
-      processedFiles: 0,
-      totalFiles: 0,
-      percent: 0,
-      currentPath: null,
-    });
-    try {
-      const data = await invoke<CodexCostAnalyticsSnapshot>("refresh_codex_cost_analytics");
-      setCostAnalytics(data);
-      setCostAnalyticsError(null);
-      return data;
-    } catch (error) {
-      const localized = localizeError(String(error));
-      setCostAnalyticsError(localized);
-      if (!quiet) {
+  const exportCostAnalytics = useCallback(
+    async (format: "csv" | "json") => {
+      if (costAnalyticsExporting) {
+        return;
+      }
+
+      setCostAnalyticsExporting(format);
+      try {
+        const exportedPath = await invoke<string | null>(
+          "export_codex_cost_analytics",
+          {
+            format,
+          },
+        );
+        if (exportedPath) {
+          setNotice({
+            type: "ok",
+            message: copy.notices.codexAnalyticsExported,
+          });
+        }
+      } catch (error) {
         setNotice({
           type: "error",
-          message: copy.notices.refreshFailed(localized),
+          message: copy.notices.codexAnalyticsExportFailed(
+            localizeError(String(error)),
+          ),
         });
+      } finally {
+        setCostAnalyticsExporting(null);
       }
-      return null;
-    } finally {
-      costAnalyticsRefreshInFlightRef.current = false;
-      setCostAnalyticsLoading(false);
-      window.setTimeout(() => setCostAnalyticsProgress(null), 600);
-    }
-  }, [copy.notices, localizeError]);
+    },
+    [copy.notices, costAnalyticsExporting, localizeError],
+  );
 
-  const exportCostAnalytics = useCallback(async (format: "csv" | "json") => {
-    if (costAnalyticsExporting) {
-      return;
-    }
-
-    setCostAnalyticsExporting(format);
-    try {
-      const exportedPath = await invoke<string | null>("export_codex_cost_analytics", {
-        format,
-      });
-      if (exportedPath) {
-        setNotice({ type: "ok", message: copy.notices.codexAnalyticsExported });
+  const onDeleteCodexSession = useCallback(
+    async (session: { sessionId: string; sourcePath: string }) => {
+      try {
+        const result = await invoke<DeleteCodexSessionResult>(
+          "delete_codex_session",
+          {
+            sourcePath: session.sourcePath,
+            sessionId: session.sessionId,
+          },
+        );
+        setNotice({
+          type: "ok",
+          message: copy.notices.codexSessionDeleted(result.sessionId),
+        });
+        await refreshCostAnalytics(true);
+      } catch (error) {
+        const message = localizeError(String(error));
+        setNotice({
+          type: "error",
+          message: copy.notices.codexSessionDeleteFailed(message),
+        });
+        throw new Error(message);
       }
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.codexAnalyticsExportFailed(localizeError(String(error))),
-      });
-    } finally {
-      setCostAnalyticsExporting(null);
-    }
-  }, [copy.notices, costAnalyticsExporting, localizeError]);
+    },
+    [copy.notices, localizeError, refreshCostAnalytics],
+  );
 
   const applyImportResult = useCallback(
     async (result: ImportAccountsResult, prefix: string) => {
@@ -744,7 +885,9 @@ export function useCodexController() {
                 100,
                 Math.round((downloadedBytes / totalBytes) * 100),
               );
-              setUpdateProgress(copy.notices.updateDownloadingPercent(percentValue));
+              setUpdateProgress(
+                copy.notices.updateDownloadingPercent(percentValue),
+              );
             } else {
               setUpdateProgress(copy.notices.updateDownloading);
             }
@@ -758,7 +901,9 @@ export function useCodexController() {
       } catch (error) {
         setNotice({
           type: "error",
-          message: copy.notices.updateInstallFailed(localizeError(String(error))),
+          message: copy.notices.updateInstallFailed(
+            localizeError(String(error)),
+          ),
         });
         setUpdateProgress(null);
       } finally {
@@ -776,7 +921,10 @@ export function useCodexController() {
       try {
         const update = await check();
         if (update) {
-          if (quiet && settingsRef.current.skippedUpdateVersion === update.version) {
+          if (
+            quiet &&
+            settingsRef.current.skippedUpdateVersion === update.version
+          ) {
             return;
           }
 
@@ -791,7 +939,10 @@ export function useCodexController() {
           if (!quiet) {
             setNotice({
               type: "info",
-              message: copy.notices.foundNewVersion(update.version, update.currentVersion),
+              message: copy.notices.foundNewVersion(
+                update.version,
+                update.currentVersion,
+              ),
             });
           }
         } else {
@@ -806,7 +957,9 @@ export function useCodexController() {
         if (!quiet) {
           setNotice({
             type: "error",
-            message: copy.notices.updateCheckFailed(localizeError(String(error))),
+            message: copy.notices.updateCheckFailed(
+              localizeError(String(error)),
+            ),
           });
         }
       } finally {
@@ -824,21 +977,28 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.openManualDownloadFailed(localizeError(String(error))),
+        message: copy.notices.openManualDownloadFailed(
+          localizeError(String(error)),
+        ),
       });
     }
   }, [copy.notices, localizeError]);
 
-  const openExternalUrl = useCallback(async (url: string) => {
-    try {
-      await invoke("open_external_url", { url });
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.openExternalFailed(localizeError(String(error))),
-      });
-    }
-  }, [copy.notices, localizeError]);
+  const openExternalUrl = useCallback(
+    async (url: string) => {
+      try {
+        await invoke("open_external_url", { url });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.openExternalFailed(
+            localizeError(String(error)),
+          ),
+        });
+      }
+    },
+    [copy.notices, localizeError],
+  );
 
   const closeUpdateDialog = useCallback(() => {
     setUpdateDialogOpen(false);
@@ -969,11 +1129,19 @@ export function useCodexController() {
     void loadAccounts();
     void loadApiProxyStatus();
     void loadCloudflaredStatus();
-  }, [loadAccounts, loadApiProxyStatus, loadCloudflaredStatus, loading, locale]);
+  }, [
+    loadAccounts,
+    loadApiProxyStatus,
+    loadCloudflaredStatus,
+    loading,
+    locale,
+  ]);
 
   useEffect(() => {
     setRemoteProxyStatusesRaw((current) => {
-      const activeIds = new Set(settings.remoteServers.map((server) => server.id));
+      const activeIds = new Set(
+        settings.remoteServers.map((server) => server.id),
+      );
       let changed = false;
       const next: Record<string, RemoteProxyStatus> = {};
 
@@ -988,7 +1156,9 @@ export function useCodexController() {
       return changed ? next : current;
     });
     setRemoteProxyLogs((current) => {
-      const activeIds = new Set(settings.remoteServers.map((server) => server.id));
+      const activeIds = new Set(
+        settings.remoteServers.map((server) => server.id),
+      );
       let changed = false;
       const next: Record<string, string> = {};
 
@@ -1014,10 +1184,16 @@ export function useCodexController() {
     void Promise.all(
       settings.remoteServers.map(async (server) => {
         try {
-          const status = await invoke<RemoteProxyStatus>("get_remote_proxy_status", { server });
+          const status = await invoke<RemoteProxyStatus>(
+            "get_remote_proxy_status",
+            { server },
+          );
           return [server.id, status] as const;
         } catch (error) {
-          return [server.id, buildRemoteProxyFallback(server, String(error))] as const;
+          return [
+            server.id,
+            buildRemoteProxyFallback(server, String(error)),
+          ] as const;
         }
       }),
     ).then((entries) => {
@@ -1120,11 +1296,14 @@ export function useCodexController() {
     let disposed = false;
     let unlisten: UnlistenFn | null = null;
 
-    void listen<CodexCostAnalyticsProgress>("codex-cost-analytics-progress", (event) => {
-      if (!disposed) {
-        setCostAnalyticsProgress(event.payload);
-      }
-    })
+    void listen<CodexCostAnalyticsProgress>(
+      "codex-cost-analytics-progress",
+      (event) => {
+        if (!disposed) {
+          setCostAnalyticsProgress(event.payload);
+        }
+      },
+    )
       .then((fn) => {
         if (disposed) {
           void fn();
@@ -1146,31 +1325,34 @@ export function useCodexController() {
     let disposed = false;
     let unlisten: UnlistenFn | null = null;
 
-    void listen<OauthCallbackFinishedEvent>("oauth-callback-finished", (event) => {
-      if (disposed) {
-        return;
-      }
+    void listen<OauthCallbackFinishedEvent>(
+      "oauth-callback-finished",
+      (event) => {
+        if (disposed) {
+          return;
+        }
 
-      setOauthWaitingForCallback(false);
-      if (event.payload.result) {
-        void applyImportResult(
-          localizeImportResult(event.payload.result),
-          copy.notices.oauthImportPrefix,
-        );
-        setReauthorizeAccount(null);
-        return;
-      }
-
-      if (event.payload.error) {
-        setNotice({
-          type: "error",
-          message: copy.notices.importFailedPlain(
+        setOauthWaitingForCallback(false);
+        if (event.payload.result) {
+          void applyImportResult(
+            localizeImportResult(event.payload.result),
             copy.notices.oauthImportPrefix,
-            localizeError(event.payload.error),
-          ),
-        });
-      }
-    })
+          );
+          setReauthorizeAccount(null);
+          return;
+        }
+
+        if (event.payload.error) {
+          setNotice({
+            type: "error",
+            message: copy.notices.importFailedPlain(
+              copy.notices.oauthImportPrefix,
+              localizeError(event.payload.error),
+            ),
+          });
+        }
+      },
+    )
       .then((fn) => {
         if (disposed) {
           void fn();
@@ -1203,7 +1385,9 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.oauthLinkPrepareFailed(localizeError(String(error))),
+        message: copy.notices.oauthLinkPrepareFailed(
+          localizeError(String(error)),
+        ),
       });
       throw error;
     }
@@ -1218,7 +1402,9 @@ export function useCodexController() {
         setOauthWaitingForCallback(false);
         setNotice({
           type: "error",
-          message: copy.notices.openExternalFailed(localizeError(String(error))),
+          message: copy.notices.openExternalFailed(
+            localizeError(String(error)),
+          ),
         });
       }
     },
@@ -1259,20 +1445,33 @@ export function useCodexController() {
 
     setImportingAccounts(true);
     try {
-      await invoke<AccountSummary>("import_current_auth_account", { label: null });
+      await invoke<AccountSummary>("import_current_auth_account", {
+        label: null,
+      });
       await refreshUsage(true);
       await loadAccounts();
       setAddDialogOpen(false);
-      setNotice({ type: "ok", message: copy.notices.currentAccountImportSuccess });
+      setNotice({
+        type: "ok",
+        message: copy.notices.currentAccountImportSuccess,
+      });
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.currentAccountImportFailed(localizeError(String(error))),
+        message: copy.notices.currentAccountImportFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setImportingAccounts(false);
     }
-  }, [copy.notices, importingAccounts, loadAccounts, localizeError, refreshUsage]);
+  }, [
+    copy.notices,
+    importingAccounts,
+    loadAccounts,
+    localizeError,
+    refreshUsage,
+  ]);
 
   const onImportAuthFiles = useCallback(
     async (items: AuthJsonImportInput[]) => {
@@ -1283,10 +1482,16 @@ export function useCodexController() {
 
       setImportingAccounts(true);
       try {
-        const result = await invoke<ImportAccountsResult>("import_auth_json_accounts", {
-          items,
-        });
-        await applyImportResult(localizeImportResult(result), copy.notices.fileImportPrefix);
+        const result = await invoke<ImportAccountsResult>(
+          "import_auth_json_accounts",
+          {
+            items,
+          },
+        );
+        await applyImportResult(
+          localizeImportResult(result),
+          copy.notices.fileImportPrefix,
+        );
       } catch (error) {
         setNotice({
           type: "error",
@@ -1327,15 +1532,37 @@ export function useCodexController() {
     [copy.notices, loadAccounts, localizeError],
   );
 
+  const onTestApiAccountConnection = useCallback(
+    async (input: TestApiAccountConnectionInput) => {
+      try {
+        return await invoke<TestApiAccountConnectionResult>(
+          "test_api_account_connection",
+          {
+            input,
+          },
+        );
+      } catch (error) {
+        throw new Error(localizeError(String(error)));
+      }
+    },
+    [localizeError],
+  );
+
   const onCompleteOauthCallbackLogin = useCallback(
     async (callbackUrl: string) => {
       setOauthWaitingForCallback(false);
       setImportingAccounts(true);
       try {
-        const result = await invoke<ImportAccountsResult>("complete_oauth_callback_login", {
-          callbackUrl,
-        });
-        await applyImportResult(localizeImportResult(result), copy.notices.oauthImportPrefix);
+        const result = await invoke<ImportAccountsResult>(
+          "complete_oauth_callback_login",
+          {
+            callbackUrl,
+          },
+        );
+        await applyImportResult(
+          localizeImportResult(result),
+          copy.notices.oauthImportPrefix,
+        );
         setReauthorizeAccount(null);
       } catch (error) {
         setNotice({
@@ -1359,60 +1586,73 @@ export function useCodexController() {
     ],
   );
 
-  const onExportAccounts = useCallback(async (account?: AccountSummary) => {
-    if (exportingAccounts) {
-      return;
-    }
-
-    setExportingAccounts(true);
-    try {
-      const exportedPath = await invoke<string | null>("export_accounts_zip", {
-        accountKey: account?.accountKey ?? null,
-      });
-      if (exportedPath) {
-        setNotice({ type: "ok", message: copy.notices.accountsExported });
+  const onExportAccounts = useCallback(
+    async (account?: AccountSummary) => {
+      if (exportingAccounts) {
+        return;
       }
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.accountsExportFailed(localizeError(String(error))),
-      });
-    } finally {
-      setExportingAccounts(false);
-    }
-  }, [copy.notices, exportingAccounts, localizeError]);
 
-  const onStartApiProxy = useCallback(async (port?: number | null) => {
-    if (startingApiProxy || apiProxyStatus.running) {
-      return;
-    }
+      setExportingAccounts(true);
+      try {
+        const exportedPath = await invoke<string | null>(
+          "export_accounts_zip",
+          {
+            accountKey: account?.accountKey ?? null,
+          },
+        );
+        if (exportedPath) {
+          setNotice({ type: "ok", message: copy.notices.accountsExported });
+        }
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.accountsExportFailed(
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setExportingAccounts(false);
+      }
+    },
+    [copy.notices, exportingAccounts, localizeError],
+  );
 
-    setStartingApiProxy(true);
-    try {
-      const status = await invoke<ApiProxyStatus>("start_api_proxy", {
-        port: port ?? null,
-      });
-      setApiProxyStatus(localizeApiProxyStatus(status));
-      void loadApiProxyUsageStats(apiProxyUsageRange);
-      const target = status.port ? `127.0.0.1:${status.port}` : copy.notices.proxyLocalTargetFallback;
-      setNotice({ type: "ok", message: copy.notices.proxyStarted(target) });
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.proxyStartFailed(localizeError(String(error))),
-      });
-    } finally {
-      setStartingApiProxy(false);
-    }
-  }, [
-    apiProxyStatus.running,
-    apiProxyUsageRange,
-    copy.notices,
-    loadApiProxyUsageStats,
-    localizeApiProxyStatus,
-    localizeError,
-    startingApiProxy,
-  ]);
+  const onStartApiProxy = useCallback(
+    async (port?: number | null) => {
+      if (startingApiProxy || apiProxyStatus.running) {
+        return;
+      }
+
+      setStartingApiProxy(true);
+      try {
+        const status = await invoke<ApiProxyStatus>("start_api_proxy", {
+          port: port ?? null,
+        });
+        setApiProxyStatus(localizeApiProxyStatus(status));
+        void loadApiProxyUsageStats(apiProxyUsageRange);
+        const target = status.port
+          ? `127.0.0.1:${status.port}`
+          : copy.notices.proxyLocalTargetFallback;
+        setNotice({ type: "ok", message: copy.notices.proxyStarted(target) });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.proxyStartFailed(localizeError(String(error))),
+        });
+      } finally {
+        setStartingApiProxy(false);
+      }
+    },
+    [
+      apiProxyStatus.running,
+      apiProxyUsageRange,
+      copy.notices,
+      loadApiProxyUsageStats,
+      localizeApiProxyStatus,
+      localizeError,
+      startingApiProxy,
+    ],
+  );
 
   const onStopApiProxy = useCallback(async () => {
     if (stoppingApiProxy || !apiProxyStatus.running) {
@@ -1454,7 +1694,9 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.proxyKeyRefreshFailed(localizeError(String(error))),
+        message: copy.notices.proxyKeyRefreshFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setRefreshingApiProxyKey(false);
@@ -1480,7 +1722,9 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.codexProxyBindFailed(localizeError(String(error))),
+        message: copy.notices.codexProxyBindFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setBindingCodexProxy(false);
@@ -1500,13 +1744,17 @@ export function useCodexController() {
 
     setRestoringCodexProxy(true);
     try {
-      const status = await invoke<ApiProxyStatus>("restore_codex_proxy_binding");
+      const status = await invoke<ApiProxyStatus>(
+        "restore_codex_proxy_binding",
+      );
       setApiProxyStatus(localizeApiProxyStatus(status));
       setNotice({ type: "ok", message: copy.notices.codexProxyRestored });
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.codexProxyRestoreFailed(localizeError(String(error))),
+        message: copy.notices.codexProxyRestoreFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setRestoringCodexProxy(false);
@@ -1535,7 +1783,9 @@ export function useCodexController() {
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("create_api_proxy_key", { input });
+        const keys = await invoke<ApiProxyKey[]>("create_api_proxy_key", {
+          input,
+        });
         await replaceApiProxyKeys(keys);
       } catch (error) {
         setNotice({ type: "error", message: localizeError(String(error)) });
@@ -1554,7 +1804,9 @@ export function useCodexController() {
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("update_api_proxy_key", { input });
+        const keys = await invoke<ApiProxyKey[]>("update_api_proxy_key", {
+          input,
+        });
         await replaceApiProxyKeys(keys);
       } catch (error) {
         setNotice({ type: "error", message: localizeError(String(error)) });
@@ -1573,7 +1825,9 @@ export function useCodexController() {
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("delete_api_proxy_key", { id });
+        const keys = await invoke<ApiProxyKey[]>("delete_api_proxy_key", {
+          id,
+        });
         await replaceApiProxyKeys(keys);
       } catch (error) {
         setNotice({ type: "error", message: localizeError(String(error)) });
@@ -1592,7 +1846,9 @@ export function useCodexController() {
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("regenerate_api_proxy_key", { id });
+        const keys = await invoke<ApiProxyKey[]>("regenerate_api_proxy_key", {
+          id,
+        });
         await replaceApiProxyKeys(keys);
       } catch (error) {
         setNotice({ type: "error", message: localizeError(String(error)) });
@@ -1615,12 +1871,15 @@ export function useCodexController() {
     [apiProxyUsageRange, loadApiProxyUsageStats],
   );
 
-  const onSelectApiProxyUsageMetric = useCallback((metric: ApiProxyUsageMetric) => {
-    if (metric === apiProxyUsageMetric) {
-      return;
-    }
-    setApiProxyUsageMetric(metric);
-  }, [apiProxyUsageMetric]);
+  const onSelectApiProxyUsageMetric = useCallback(
+    (metric: ApiProxyUsageMetric) => {
+      if (metric === apiProxyUsageMetric) {
+        return;
+      }
+      setApiProxyUsageMetric(metric);
+    },
+    [apiProxyUsageMetric],
+  );
 
   const onClearApiProxyUsageStats = useCallback(async () => {
     if (apiProxyUsageClearing) {
@@ -1636,7 +1895,9 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.apiProxyUsageClearFailed(localizeError(String(error))),
+        message: copy.notices.apiProxyUsageClearFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setApiProxyUsageClearing(false);
@@ -1680,7 +1941,10 @@ export function useCodexController() {
       } catch (error) {
         setNotice({
           type: "error",
-          message: copy.notices.dependencyInstallFailed("sshpass", localizeError(String(error))),
+          message: copy.notices.dependencyInstallFailed(
+            "sshpass",
+            localizeError(String(error)),
+          ),
         });
         return false;
       } finally {
@@ -1691,175 +1955,246 @@ export function useCodexController() {
     [copy.notices, installingDependencyName, localizeError],
   );
 
-  const onRefreshRemoteProxyStatus = useCallback(async (server: RemoteServerConfig) => {
-    if (refreshingRemoteProxyId === server.id) {
-      return;
-    }
+  const onRefreshRemoteProxyStatus = useCallback(
+    async (server: RemoteServerConfig) => {
+      if (refreshingRemoteProxyId === server.id) {
+        return;
+      }
 
-    if (!(await ensureRemoteLocalDependency(server))) {
-      return;
-    }
+      if (!(await ensureRemoteLocalDependency(server))) {
+        return;
+      }
 
-    setRefreshingRemoteProxyId(server.id);
-    try {
-      const status = await invoke<RemoteProxyStatus>("get_remote_proxy_status", { server });
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: status,
-      }));
-    } catch (error) {
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: buildRemoteProxyFallback(server, String(error)),
-      }));
-      setNotice({
-        type: "error",
-        message: copy.notices.remoteStatusFailed(server.label, localizeError(String(error))),
+      setRefreshingRemoteProxyId(server.id);
+      try {
+        const status = await invoke<RemoteProxyStatus>(
+          "get_remote_proxy_status",
+          { server },
+        );
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: status,
+        }));
+      } catch (error) {
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: buildRemoteProxyFallback(server, String(error)),
+        }));
+        setNotice({
+          type: "error",
+          message: copy.notices.remoteStatusFailed(
+            server.label,
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setRefreshingRemoteProxyId(null);
+      }
+    },
+    [
+      copy.notices,
+      ensureRemoteLocalDependency,
+      localizeError,
+      refreshingRemoteProxyId,
+    ],
+  );
+
+  const onDeployRemoteProxy = useCallback(
+    async (server: RemoteServerConfig) => {
+      if (deployingRemoteProxyId === server.id) {
+        return;
+      }
+
+      setRemoteDeployProgress({
+        serverId: server.id,
+        label: server.label,
+        stage: "validating",
+        progress: 6,
+        detail: null,
       });
-    } finally {
-      setRefreshingRemoteProxyId(null);
-    }
-  }, [copy.notices, ensureRemoteLocalDependency, localizeError, refreshingRemoteProxyId]);
 
-  const onDeployRemoteProxy = useCallback(async (server: RemoteServerConfig) => {
-    if (deployingRemoteProxyId === server.id) {
-      return;
-    }
+      if (!(await ensureRemoteLocalDependency(server))) {
+        setRemoteDeployProgress((current) =>
+          current?.serverId === server.id ? null : current,
+        );
+        return;
+      }
 
-    setRemoteDeployProgress({
-      serverId: server.id,
-      label: server.label,
-      stage: "validating",
-      progress: 6,
-      detail: null,
-    });
+      setDeployingRemoteProxyId(server.id);
+      try {
+        const status = await invoke<RemoteProxyStatus>("deploy_remote_proxy", {
+          input: {
+            server,
+          },
+        });
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: status,
+        }));
+        setNotice({
+          type: "ok",
+          message: copy.notices.remoteProxyDeployed(server.label),
+        });
+      } catch (error) {
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: buildRemoteProxyFallback(server, String(error)),
+        }));
+        setNotice({
+          type: "error",
+          message: copy.notices.remoteProxyDeployFailed(
+            server.label,
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setRemoteDeployProgress((current) =>
+          current?.serverId === server.id ? null : current,
+        );
+        setDeployingRemoteProxyId(null);
+      }
+    },
+    [
+      copy.notices,
+      deployingRemoteProxyId,
+      ensureRemoteLocalDependency,
+      localizeError,
+    ],
+  );
 
-    if (!(await ensureRemoteLocalDependency(server))) {
-      setRemoteDeployProgress((current) =>
-        current?.serverId === server.id ? null : current,
-      );
-      return;
-    }
+  const onStartRemoteProxy = useCallback(
+    async (server: RemoteServerConfig) => {
+      if (startingRemoteProxyId === server.id) {
+        return;
+      }
 
-    setDeployingRemoteProxyId(server.id);
-    try {
-      const status = await invoke<RemoteProxyStatus>("deploy_remote_proxy", {
-        input: {
+      if (!(await ensureRemoteLocalDependency(server))) {
+        return;
+      }
+
+      setStartingRemoteProxyId(server.id);
+      try {
+        const status = await invoke<RemoteProxyStatus>("start_remote_proxy", {
           server,
-        },
-      });
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: status,
-      }));
-      setNotice({ type: "ok", message: copy.notices.remoteProxyDeployed(server.label) });
-    } catch (error) {
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: buildRemoteProxyFallback(server, String(error)),
-      }));
-      setNotice({
-        type: "error",
-        message: copy.notices.remoteProxyDeployFailed(server.label, localizeError(String(error))),
-      });
-    } finally {
-      setRemoteDeployProgress((current) =>
-        current?.serverId === server.id ? null : current,
-      );
-      setDeployingRemoteProxyId(null);
-    }
-  }, [copy.notices, deployingRemoteProxyId, ensureRemoteLocalDependency, localizeError]);
+        });
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: status,
+        }));
+        setNotice({
+          type: "ok",
+          message: copy.notices.remoteProxyStarted(server.label),
+        });
+      } catch (error) {
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: buildRemoteProxyFallback(server, String(error)),
+        }));
+        setNotice({
+          type: "error",
+          message: copy.notices.remoteProxyStartFailed(
+            server.label,
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setStartingRemoteProxyId(null);
+      }
+    },
+    [
+      copy.notices,
+      ensureRemoteLocalDependency,
+      localizeError,
+      startingRemoteProxyId,
+    ],
+  );
 
-  const onStartRemoteProxy = useCallback(async (server: RemoteServerConfig) => {
-    if (startingRemoteProxyId === server.id) {
-      return;
-    }
+  const onStopRemoteProxy = useCallback(
+    async (server: RemoteServerConfig) => {
+      if (stoppingRemoteProxyId === server.id) {
+        return;
+      }
 
-    if (!(await ensureRemoteLocalDependency(server))) {
-      return;
-    }
+      if (!(await ensureRemoteLocalDependency(server))) {
+        return;
+      }
 
-    setStartingRemoteProxyId(server.id);
-    try {
-      const status = await invoke<RemoteProxyStatus>("start_remote_proxy", { server });
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: status,
-      }));
-      setNotice({ type: "ok", message: copy.notices.remoteProxyStarted(server.label) });
-    } catch (error) {
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: buildRemoteProxyFallback(server, String(error)),
-      }));
-      setNotice({
-        type: "error",
-        message: copy.notices.remoteProxyStartFailed(server.label, localizeError(String(error))),
-      });
-    } finally {
-      setStartingRemoteProxyId(null);
-    }
-  }, [copy.notices, ensureRemoteLocalDependency, localizeError, startingRemoteProxyId]);
+      setStoppingRemoteProxyId(server.id);
+      try {
+        const status = await invoke<RemoteProxyStatus>("stop_remote_proxy", {
+          server,
+        });
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: status,
+        }));
+        setNotice({
+          type: "ok",
+          message: copy.notices.remoteProxyStopped(server.label),
+        });
+      } catch (error) {
+        setRemoteProxyStatusesRaw((current) => ({
+          ...current,
+          [server.id]: buildRemoteProxyFallback(server, String(error)),
+        }));
+        setNotice({
+          type: "error",
+          message: copy.notices.remoteProxyStopFailed(
+            server.label,
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setStoppingRemoteProxyId(null);
+      }
+    },
+    [
+      copy.notices,
+      ensureRemoteLocalDependency,
+      localizeError,
+      stoppingRemoteProxyId,
+    ],
+  );
 
-  const onStopRemoteProxy = useCallback(async (server: RemoteServerConfig) => {
-    if (stoppingRemoteProxyId === server.id) {
-      return;
-    }
+  const onReadRemoteProxyLogs = useCallback(
+    async (server: RemoteServerConfig) => {
+      if (readingRemoteLogsId === server.id) {
+        return;
+      }
 
-    if (!(await ensureRemoteLocalDependency(server))) {
-      return;
-    }
+      if (!(await ensureRemoteLocalDependency(server))) {
+        return;
+      }
 
-    setStoppingRemoteProxyId(server.id);
-    try {
-      const status = await invoke<RemoteProxyStatus>("stop_remote_proxy", { server });
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: status,
-      }));
-      setNotice({ type: "ok", message: copy.notices.remoteProxyStopped(server.label) });
-    } catch (error) {
-      setRemoteProxyStatusesRaw((current) => ({
-        ...current,
-        [server.id]: buildRemoteProxyFallback(server, String(error)),
-      }));
-      setNotice({
-        type: "error",
-        message: copy.notices.remoteProxyStopFailed(server.label, localizeError(String(error))),
-      });
-    } finally {
-      setStoppingRemoteProxyId(null);
-    }
-  }, [copy.notices, ensureRemoteLocalDependency, localizeError, stoppingRemoteProxyId]);
-
-  const onReadRemoteProxyLogs = useCallback(async (server: RemoteServerConfig) => {
-    if (readingRemoteLogsId === server.id) {
-      return;
-    }
-
-    if (!(await ensureRemoteLocalDependency(server))) {
-      return;
-    }
-
-    setReadingRemoteLogsId(server.id);
-    try {
-      const output = await invoke<string>("read_remote_proxy_logs", {
-        server,
-        lines: 120,
-      });
-      setRemoteProxyLogs((current) => ({
-        ...current,
-        [server.id]: output.trim(),
-      }));
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.remoteLogsFailed(server.label, localizeError(String(error))),
-      });
-    } finally {
-      setReadingRemoteLogsId(null);
-    }
-  }, [copy.notices, ensureRemoteLocalDependency, localizeError, readingRemoteLogsId]);
+      setReadingRemoteLogsId(server.id);
+      try {
+        const output = await invoke<string>("read_remote_proxy_logs", {
+          server,
+          lines: 120,
+        });
+        setRemoteProxyLogs((current) => ({
+          ...current,
+          [server.id]: output.trim(),
+        }));
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.remoteLogsFailed(
+            server.label,
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setReadingRemoteLogsId(null);
+      }
+    },
+    [
+      copy.notices,
+      ensureRemoteLocalDependency,
+      localizeError,
+      readingRemoteLogsId,
+    ],
+  );
 
   const onPickLocalIdentityFile = useCallback(async () => {
     try {
@@ -1867,7 +2202,9 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.pickIdentityFileFailed(localizeError(String(error))),
+        message: copy.notices.pickIdentityFileFailed(
+          localizeError(String(error)),
+        ),
       });
       return null;
     }
@@ -1886,39 +2223,58 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.cloudflaredInstallFailed(localizeError(String(error))),
+        message: copy.notices.cloudflaredInstallFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setInstallingCloudflared(false);
     }
-  }, [copy.notices, installingCloudflared, localizeCloudflaredStatus, localizeError]);
-
-  const onStartCloudflared = useCallback(async (input: StartCloudflaredTunnelInput) => {
-    if (startingCloudflared || cloudflaredStatus.running) {
-      return;
-    }
-
-    setStartingCloudflared(true);
-    try {
-      const status = await invoke<CloudflaredStatus>("start_cloudflared_tunnel", { input });
-      setCloudflaredStatus(localizeCloudflaredStatus(status));
-      const target = status.publicUrl ?? copy.notices.cloudflaredPublicUrlFallback;
-      setNotice({ type: "ok", message: copy.notices.cloudflaredStarted(target) });
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.cloudflaredStartFailed(localizeError(String(error))),
-      });
-    } finally {
-      setStartingCloudflared(false);
-    }
   }, [
-    cloudflaredStatus.running,
     copy.notices,
+    installingCloudflared,
     localizeCloudflaredStatus,
     localizeError,
-    startingCloudflared,
   ]);
+
+  const onStartCloudflared = useCallback(
+    async (input: StartCloudflaredTunnelInput) => {
+      if (startingCloudflared || cloudflaredStatus.running) {
+        return;
+      }
+
+      setStartingCloudflared(true);
+      try {
+        const status = await invoke<CloudflaredStatus>(
+          "start_cloudflared_tunnel",
+          { input },
+        );
+        setCloudflaredStatus(localizeCloudflaredStatus(status));
+        const target =
+          status.publicUrl ?? copy.notices.cloudflaredPublicUrlFallback;
+        setNotice({
+          type: "ok",
+          message: copy.notices.cloudflaredStarted(target),
+        });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.cloudflaredStartFailed(
+            localizeError(String(error)),
+          ),
+        });
+      } finally {
+        setStartingCloudflared(false);
+      }
+    },
+    [
+      cloudflaredStatus.running,
+      copy.notices,
+      localizeCloudflaredStatus,
+      localizeError,
+      startingCloudflared,
+    ],
+  );
 
   const onStopCloudflared = useCallback(async () => {
     if (stoppingCloudflared || !cloudflaredStatus.running) {
@@ -1933,7 +2289,9 @@ export function useCodexController() {
     } catch (error) {
       setNotice({
         type: "error",
-        message: copy.notices.cloudflaredStopFailed(localizeError(String(error))),
+        message: copy.notices.cloudflaredStopFailed(
+          localizeError(String(error)),
+        ),
       });
     } finally {
       setStoppingCloudflared(false);
@@ -1991,7 +2349,9 @@ export function useCodexController() {
       } catch (error) {
         setNotice({
           type: "error",
-          message: copy.notices.accountAliasUpdateFailed(localizeError(String(error))),
+          message: copy.notices.accountAliasUpdateFailed(
+            localizeError(String(error)),
+          ),
         });
         return false;
       } finally {
@@ -2018,10 +2378,13 @@ export function useCodexController() {
       );
 
       try {
-        const resolvedEnabled = await invoke<boolean>("update_account_api_proxy_enabled", {
-          accountKey: account.accountKey,
-          enabled,
-        });
+        const resolvedEnabled = await invoke<boolean>(
+          "update_account_api_proxy_enabled",
+          {
+            accountKey: account.accountKey,
+            enabled,
+          },
+        );
         setAccounts((prev) =>
           prev.map((item) =>
             item.accountKey === account.accountKey
@@ -2064,7 +2427,9 @@ export function useCodexController() {
         );
         setNotice({
           type: "error",
-          message: copy.notices.accountApiProxyToggleFailed(localizeError(String(error))),
+          message: copy.notices.accountApiProxyToggleFailed(
+            localizeError(String(error)),
+          ),
         });
         return false;
       }
@@ -2072,49 +2437,60 @@ export function useCodexController() {
     [copy.notices, localizeError],
   );
 
-  const onDelete = useCallback(async (account: AccountSummary) => {
-    if (pendingDeleteId !== account.id) {
-      setPendingDeleteId(account.id);
+  const onDelete = useCallback(
+    async (account: AccountSummary) => {
+      if (pendingDeleteId !== account.id) {
+        setPendingDeleteId(account.id);
+        if (deleteConfirmTimerRef.current !== null) {
+          window.clearTimeout(deleteConfirmTimerRef.current);
+        }
+        deleteConfirmTimerRef.current = window.setTimeout(() => {
+          setPendingDeleteId((current) =>
+            current === account.id ? null : current,
+          );
+          deleteConfirmTimerRef.current = null;
+        }, 5_000);
+        setNotice({
+          type: "info",
+          message: copy.notices.deleteConfirm(account.label),
+        });
+        return;
+      }
+
       if (deleteConfirmTimerRef.current !== null) {
         window.clearTimeout(deleteConfirmTimerRef.current);
-      }
-      deleteConfirmTimerRef.current = window.setTimeout(() => {
-        setPendingDeleteId((current) => (current === account.id ? null : current));
         deleteConfirmTimerRef.current = null;
-      }, 5_000);
-      setNotice({ type: "info", message: copy.notices.deleteConfirm(account.label) });
-      return;
-    }
+      }
+      setPendingDeleteId(null);
 
-    if (deleteConfirmTimerRef.current !== null) {
-      window.clearTimeout(deleteConfirmTimerRef.current);
-      deleteConfirmTimerRef.current = null;
-    }
-    setPendingDeleteId(null);
-
-    try {
-      await invoke<void>("delete_account", { id: account.id });
-      setAccounts((prev) => prev.filter((item) => item.id !== account.id));
-      setNotice({ type: "ok", message: copy.notices.accountDeleted });
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: copy.notices.deleteFailed(localizeError(String(error))),
-      });
-    }
-  }, [copy.notices, localizeError, pendingDeleteId]);
+      try {
+        await invoke<void>("delete_account", { id: account.id });
+        setAccounts((prev) => prev.filter((item) => item.id !== account.id));
+        setNotice({ type: "ok", message: copy.notices.accountDeleted });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.deleteFailed(localizeError(String(error))),
+        });
+      }
+    },
+    [copy.notices, localizeError, pendingDeleteId],
+  );
 
   const onSwitch = useCallback(
     async (account: AccountSummary) => {
       setSwitchingId(account.id);
       try {
-        const result = await invoke<SwitchAccountResult>("switch_account_and_launch", {
-          id: account.id,
-          workspacePath: null,
-          launchCodex: settings.launchCodexAfterSwitch,
-          restartEditorsOnSwitch: settings.restartEditorsOnSwitch,
-          restartEditorTargets: settings.restartEditorTargets,
-        });
+        const result = await invoke<SwitchAccountResult>(
+          "switch_account_and_launch",
+          {
+            id: account.id,
+            workspacePath: null,
+            launchCodex: settings.launchCodexAfterSwitch,
+            restartEditorsOnSwitch: settings.restartEditorsOnSwitch,
+            restartEditorTargets: settings.restartEditorTargets,
+          },
+        );
         await loadAccounts();
 
         let baseNotice: Notice;
@@ -2126,7 +2502,10 @@ export function useCodexController() {
             message: copy.notices.switchedAndLaunchByCli,
           };
         } else {
-          baseNotice = { type: "ok", message: copy.notices.switchedAndLaunching };
+          baseNotice = {
+            type: "ok",
+            message: copy.notices.switchedAndLaunching,
+          };
         }
 
         if (settings.syncOpencodeOpenaiAuth) {
@@ -2157,7 +2536,9 @@ export function useCodexController() {
             } else if (result.opencodeDesktopRestarted) {
               baseNotice = {
                 ...baseNotice,
-                message: copy.notices.opencodeDesktopRestarted(baseNotice.message),
+                message: copy.notices.opencodeDesktopRestarted(
+                  baseNotice.message,
+                ),
               };
             }
           }
@@ -2178,7 +2559,10 @@ export function useCodexController() {
               .join(" / ");
             baseNotice = {
               ...baseNotice,
-              message: copy.notices.editorsRestarted(baseNotice.message, restartedLabels),
+              message: copy.notices.editorsRestarted(
+                baseNotice.message,
+                restartedLabels,
+              ),
             };
           } else {
             baseNotice = {
@@ -2233,7 +2617,13 @@ export function useCodexController() {
     }
 
     await onSwitch(target);
-  }, [copy.notices, onSwitch, settings.smartSwitchIncludeApi, sortedAccounts, switchingId]);
+  }, [
+    copy.notices,
+    onSwitch,
+    settings.smartSwitchIncludeApi,
+    sortedAccounts,
+    switchingId,
+  ]);
 
   const onUpdateRemoteServers = useCallback(
     async (remoteServers: RemoteServerConfig[]) => {
@@ -2314,6 +2704,7 @@ export function useCodexController() {
     loadCostAnalytics,
     refreshCostAnalytics,
     exportCostAnalytics,
+    onDeleteCodexSession,
     checkForAppUpdate,
     installPendingUpdate,
     openDebugUpdateDialog,
@@ -2329,6 +2720,7 @@ export function useCodexController() {
     onCompleteOauthCallbackLogin,
     onImportCurrentAuth,
     onCreateApiAccount,
+    onTestApiAccountConnection,
     onImportAuthFiles,
     onExportAccounts,
     loadApiProxyStatus,

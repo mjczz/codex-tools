@@ -75,6 +75,11 @@ export type CodexSessionCostBreakdown = {
   sourcePath: string;
 };
 
+export type DeleteCodexSessionResult = {
+  sessionId: string;
+  deletedPath: string;
+};
+
 export type CodexHourlyCostBucket = {
   weekday: number;
   hour: number;
@@ -185,6 +190,19 @@ export type CreateApiAccountInput = {
   apiKey: string;
   modelName: string;
   forceSave: boolean;
+};
+
+export type TestApiAccountConnectionInput = {
+  label: string;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+};
+
+export type TestApiAccountConnectionResult = {
+  ok: boolean;
+  balanceText: string | null;
+  message: string;
 };
 
 export type ImportAccountFailure = {

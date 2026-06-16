@@ -1,3 +1,6 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { PointerEvent } from "react";
+
 import { useI18n } from "../i18n/I18nProvider";
 import type { ThemeMode } from "../types/app";
 
@@ -69,6 +72,14 @@ export function AppTopBar({
     { id: "proxy", label: copy.bottomDock.proxy },
     { id: "settings", label: copy.bottomDock.settings },
   ];
+  const handleStartWindowDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !event.isPrimary || !("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+
+    event.preventDefault();
+    void getCurrentWindow().startDragging().catch(() => {});
+  };
 
   return (
     <header className="topbar">
@@ -76,7 +87,12 @@ export function AppTopBar({
         <img className="appLogo" src="/codex-tools.png" alt={copy.topBar.logoAlt} />
         <h1>{copy.topBar.appTitle}</h1>
       </button>
-      <div className="topDragRegion" data-tauri-drag-region aria-hidden="true" />
+      <div
+        className="topDragRegion"
+        data-tauri-drag-region
+        aria-hidden="true"
+        onPointerDown={handleStartWindowDrag}
+      />
       <nav className="topSegmentedNav" aria-label={copy.bottomDock.ariaLabel}>
         {navItems.map((item) => (
           <button

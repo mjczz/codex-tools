@@ -36,6 +36,8 @@ use crate::models::CreateApiAccountInput;
 use crate::models::ImportAccountFailure;
 use crate::models::ImportAccountsResult;
 use crate::models::StoredAccount;
+use crate::models::TestApiAccountConnectionInput;
+use crate::models::TestApiAccountConnectionResult;
 use crate::models::UsageSnapshot;
 use crate::profile_files;
 use crate::state::AppState;
@@ -90,6 +92,14 @@ struct PreparedImport {
     plan_type: Option<String>,
     usage: Option<UsageSnapshot>,
     label: Option<String>,
+}
+
+#[derive(Debug)]
+struct NormalizedApiAccountConnectionInput {
+    _label: String,
+    base_url: String,
+    api_key: String,
+    model_name: String,
 }
 
 pub(crate) async fn list_accounts_internal(
@@ -202,6 +212,35 @@ pub(crate) async fn create_api_account_internal(
     };
 
     Ok(summary)
+}
+
+pub(crate) async fn test_api_account_connection_internal(
+    input: TestApiAccountConnectionInput,
+) -> Result<TestApiAccountConnectionResult, String> {
+    let normalized = normalize_api_account_connection_input(&input)?;
+    let balance_text = profile_files::validate_relay_target(
+        &normalized.base_url,
+        &normalized.api_key,
+        &normalized.model_name,
+    )
+    .await?;
+
+    Ok(TestApiAccountConnectionResult {
+        ok: true,
+        balance_text,
+        message: "连接成功".to_string(),
+    })
+}
+
+fn normalize_api_account_connection_input(
+    input: &TestApiAccountConnectionInput,
+) -> Result<NormalizedApiAccountConnectionInput, String> {
+    Ok(NormalizedApiAccountConnectionInput {
+        _label: profile_files::normalize_relay_label(&input.label)?,
+        base_url: profile_files::normalize_relay_base_url(&input.base_url)?,
+        api_key: profile_files::normalize_relay_api_key(&input.api_key)?,
+        model_name: profile_files::normalize_relay_model_name(&input.model_name)?,
+    })
 }
 
 pub(crate) async fn reauthorize_account_internal(
@@ -1857,6 +1896,7 @@ mod tests {
     use super::expand_import_json_content;
     use super::is_stale_refresh_snapshot_error;
     use super::keepalive_max_last_refresh_age_secs;
+    use super::normalize_api_account_connection_input;
     use super::normalize_usage_error_message;
     use super::refresh_usage_worker_count_from_resources;
     use super::should_suspend_auth_keepalive;
@@ -1868,9 +1908,23 @@ mod tests {
     use super::USAGE_AUTH_TOKEN_EXPIRED_NOTICE;
     use crate::models::AccountsStore;
     use crate::models::StoredAccount;
+    use crate::models::TestApiAccountConnectionInput;
     use crate::models::UsageSnapshot;
     use crate::models::UsageWindow;
     use serde_json::json;
+
+    fn test_api_input(
+        base_url: &str,
+        api_key: &str,
+        model_name: &str,
+    ) -> TestApiAccountConnectionInput {
+        TestApiAccountConnectionInput {
+            label: "Test API".to_string(),
+            base_url: base_url.to_string(),
+            api_key: api_key.to_string(),
+            model_name: model_name.to_string(),
+        }
+    }
 
     fn usage_snapshot(plan_type: &str) -> UsageSnapshot {
         UsageSnapshot {
@@ -1888,6 +1942,51 @@ mod tests {
             }),
             credits: None,
         }
+    }
+
+    #[test]
+    fn test_api_account_connection_normalizes_valid_input() {
+        let normalized = normalize_api_account_connection_input(&test_api_input(
+            " https://example.com/v1/// ",
+            " provider-token-123 ",
+            " gpt-test ",
+        ))
+        .expect("valid input should normalize");
+
+        assert_eq!(normalized.base_url, "https://example.com/v1");
+        assert_eq!(normalized.api_key, "provider-token-123");
+        assert_eq!(normalized.model_name, "gpt-test");
+    }
+
+    #[test]
+    fn test_api_account_connection_rejects_invalid_base_url() {
+        let error = normalize_api_account_connection_input(&test_api_input(
+            "example.com/v1",
+            "sk-test",
+            "gpt-test",
+        ))
+        .expect_err("base url without scheme should fail");
+
+        assert!(error.contains("http/https"));
+    }
+
+    #[test]
+    fn test_api_account_connection_rejects_empty_key_or_model() {
+        let key_error = normalize_api_account_connection_input(&test_api_input(
+            "https://example.com/v1",
+            " ",
+            "gpt-test",
+        ))
+        .expect_err("empty key should fail");
+        let model_error = normalize_api_account_connection_input(&test_api_input(
+            "https://example.com/v1",
+            "sk-test",
+            " ",
+        ))
+        .expect_err("empty model should fail");
+
+        assert!(key_error.contains("API Key"));
+        assert!(model_error.contains("模型"));
     }
 
     fn prepared_import(

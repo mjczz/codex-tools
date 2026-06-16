@@ -46,6 +46,7 @@
 }
 
 .topbar {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(260px, 1fr) minmax(440px, 520px) minmax(260px, 1fr);
   grid-template-areas: "brand nav actions";
@@ -104,10 +105,9 @@
 }
 
 .topDragRegion {
-  grid-area: 1 / 1 / 2 / -1;
-  min-width: 0;
-  min-height: 0;
-  height: 100%;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
   user-select: none;
   cursor: grab;
 }

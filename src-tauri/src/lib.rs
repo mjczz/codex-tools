@@ -49,6 +49,7 @@ use models::AuthJsonImportInput;
 use models::CloudflaredStatus;
 use models::CreateApiAccountInput;
 use models::CreateApiProxyKeyInput;
+use models::DeleteCodexSessionResult;
 use models::DeployRemoteProxyInput;
 use models::EditorAppId;
 use models::ImportAccountsResult;
@@ -59,6 +60,8 @@ use models::RemoteProxyStatus;
 use models::RemoteServerConfig;
 use models::StartCloudflaredTunnelInput;
 use models::SwitchAccountResult;
+use models::TestApiAccountConnectionInput;
+use models::TestApiAccountConnectionResult;
 use models::UpdateApiProxyKeyInput;
 use state::AppState;
 use state::OauthCallbackListenerHandle;
@@ -574,6 +577,13 @@ async fn create_api_account(
 }
 
 #[tauri::command]
+async fn test_api_account_connection(
+    input: TestApiAccountConnectionInput,
+) -> Result<TestApiAccountConnectionResult, String> {
+    account_service::test_api_account_connection_internal(input).await
+}
+
+#[tauri::command]
 async fn import_auth_json_accounts(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -794,6 +804,105 @@ async fn export_codex_cost_analytics(
     })
     .await
     .map_err(|error| format!("导出 Codex 成本分析失败: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_codex_session(
+    app: AppHandle,
+    source_path: String,
+    session_id: String,
+) -> Result<DeleteCodexSessionResult, String> {
+    let cache_path = codex_cost_analytics_cache_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let codex_dir = app_paths::codex_dir()?;
+        let roots = [
+            codex_dir.join("sessions"),
+            codex_dir.join("archived_sessions"),
+        ];
+        let deleted_path = delete_codex_session_from_roots(
+            &roots,
+            std::path::Path::new(&source_path),
+            &session_id,
+        )?;
+        match std::fs::remove_file(&cache_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "删除成本分析缓存失败 {}: {error}",
+                    cache_path.display()
+                ));
+            }
+        }
+
+        Ok(DeleteCodexSessionResult {
+            session_id,
+            deleted_path: deleted_path.to_string_lossy().to_string(),
+        })
+    })
+    .await
+    .map_err(|error| format!("删除 Codex 会话失败: {error}"))?
+}
+
+fn delete_codex_session_from_roots(
+    roots: &[std::path::PathBuf],
+    source_path: &std::path::Path,
+    session_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err("会话 ID 为空".to_string());
+    }
+    if source_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+        return Err("只允许删除 Codex JSONL 会话文件".to_string());
+    }
+
+    let canonical_source = source_path
+        .canonicalize()
+        .map_err(|error| format!("读取 Codex 会话文件失败 {}: {error}", source_path.display()))?;
+    let allowed = roots.iter().any(|root| {
+        root.canonicalize()
+            .map(|canonical_root| canonical_source.starts_with(canonical_root))
+            .unwrap_or(false)
+    });
+    if !allowed {
+        return Err("只允许删除 Codex sessions 目录内的会话文件".to_string());
+    }
+
+    if !codex_session_file_matches_id(&canonical_source, session_id)? {
+        return Err("会话文件与请求的会话 ID 不匹配".to_string());
+    }
+
+    std::fs::remove_file(&canonical_source).map_err(|error| {
+        format!(
+            "删除 Codex 会话文件失败 {}: {error}",
+            canonical_source.display()
+        )
+    })?;
+    Ok(canonical_source)
+}
+
+fn codex_session_file_matches_id(path: &std::path::Path, session_id: &str) -> Result<bool, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| format!("读取 Codex 会话文件失败 {}: {error}", path.display()))?;
+    for line in raw.lines() {
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if root.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let Some(id) = root
+            .get("payload")
+            .and_then(|payload| payload.get("id"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        return Ok(id == session_id);
+    }
+
+    Ok(path.file_stem().and_then(|value| value.to_str()) == Some(session_id))
 }
 
 fn codex_cost_analytics_cache_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -1083,7 +1192,37 @@ async fn cancel_oauth_login(state: State<'_, AppState>) -> Result<(), String> {
 mod tests {
     use super::bind_oauth_callback_listener;
     use super::build_oauth_callback_url;
+    use super::delete_codex_session_from_roots;
+    use std::fs;
     use std::net::TcpListener;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "codex-tools-lib-test-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn write_test_session(path: &Path, session_id: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create test session dir");
+        }
+        fs::write(
+            path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/tmp/project\"}}}}\n"
+            ),
+        )
+        .expect("write test session");
+    }
 
     #[test]
     fn build_oauth_callback_url_uses_redirect_origin_and_runtime_query() {
@@ -1124,6 +1263,69 @@ mod tests {
 
         assert_eq!(resolved_port, preferred_port);
         assert!(!listeners.is_empty());
+    }
+
+    #[test]
+    fn delete_codex_session_rejects_paths_outside_session_roots() {
+        let sandbox = unique_test_dir("outside-session-root");
+        let sessions = sandbox.join("codex").join("sessions");
+        let archived_sessions = sandbox.join("codex").join("archived_sessions");
+        fs::create_dir_all(&sessions).expect("create sessions root");
+        fs::create_dir_all(&archived_sessions).expect("create archived sessions root");
+        let outside = sandbox.join("outside").join("session-1.jsonl");
+        write_test_session(&outside, "session-1");
+
+        let error =
+            delete_codex_session_from_roots(&[sessions, archived_sessions], &outside, "session-1")
+                .expect_err("outside file should be rejected");
+
+        assert!(error.contains("sessions"));
+        assert!(outside.is_file());
+        let _ = fs::remove_dir_all(sandbox);
+    }
+
+    #[test]
+    fn delete_codex_session_rejects_mismatched_session_id() {
+        let sandbox = unique_test_dir("mismatched-session");
+        let sessions = sandbox.join("codex").join("sessions");
+        let archived_sessions = sandbox.join("codex").join("archived_sessions");
+        fs::create_dir_all(&sessions).expect("create sessions root");
+        fs::create_dir_all(&archived_sessions).expect("create archived sessions root");
+        let source = sessions.join("session-1.jsonl");
+        write_test_session(&source, "session-1");
+
+        let error =
+            delete_codex_session_from_roots(&[sessions, archived_sessions], &source, "session-2")
+                .expect_err("mismatched session should be rejected");
+
+        assert!(error.contains("不匹配"));
+        assert!(source.is_file());
+        let _ = fs::remove_dir_all(sandbox);
+    }
+
+    #[test]
+    fn delete_codex_session_removes_only_target_jsonl() {
+        let sandbox = unique_test_dir("delete-session");
+        let sessions = sandbox.join("codex").join("sessions");
+        let archived_sessions = sandbox.join("codex").join("archived_sessions");
+        fs::create_dir_all(&sessions).expect("create sessions root");
+        fs::create_dir_all(&archived_sessions).expect("create archived sessions root");
+        let target = sessions.join("session-1.jsonl");
+        let other = sessions.join("session-2.jsonl");
+        write_test_session(&target, "session-1");
+        write_test_session(&other, "session-2");
+
+        let deleted =
+            delete_codex_session_from_roots(&[sessions, archived_sessions], &target, "session-1")
+                .expect("target session should be deleted");
+
+        assert_eq!(
+            deleted.file_name().and_then(|value| value.to_str()),
+            Some("session-1.jsonl")
+        );
+        assert!(!target.exists());
+        assert!(other.is_file());
+        let _ = fs::remove_dir_all(sandbox);
     }
 }
 
@@ -2050,6 +2252,7 @@ pub fn run() {
             list_accounts,
             import_current_auth_account,
             create_api_account,
+            test_api_account_connection,
             import_auth_json_accounts,
             export_accounts_zip,
             delete_account,
@@ -2061,6 +2264,7 @@ pub fn run() {
             get_cached_codex_cost_analytics,
             refresh_codex_cost_analytics,
             export_codex_cost_analytics,
+            delete_codex_session,
             get_app_settings,
             update_app_settings,
             detect_codex_app,

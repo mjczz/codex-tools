@@ -396,6 +396,18 @@
   color: var(--muted);
 }
 
+.analyticsDeleteButton {
+  min-width: 86px;
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line) 72%);
+  color: color-mix(in srgb, var(--danger) 82%, var(--ink) 18%);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-tint) 93%);
+}
+
+.analyticsDeleteButton:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--line) 52%);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-tint) 88%);
+}
+
 .analyticsPromptRow {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
