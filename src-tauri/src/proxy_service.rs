@@ -5008,13 +5008,26 @@ fn should_replace_proxy_candidate(existing: &ProxyCandidate, candidate: &ProxyCa
 }
 
 fn log_proxy_request_route(route: &str) {
-    log::info!("API proxy 请求来了 route={route}");
+    log::info!(
+        "\x1b[36mAPI proxy\x1b[0m 请求来了 route=\x1b[33m{route}\x1b[0m",
+    );
 }
 
 fn log_proxy_response_route(route: &str, status: StatusCode) {
+    let code = status.as_u16();
+    let status_painted = if (200..300).contains(&code) {
+        format!("\x1b[32m{code}\x1b[0m")
+    } else if (300..400).contains(&code) {
+        format!("\x1b[36m{code}\x1b[0m")
+    } else if (400..500).contains(&code) {
+        format!("\x1b[33m{code}\x1b[0m")
+    } else if (500..600).contains(&code) {
+        format!("\x1b[31m{code}\x1b[0m")
+    } else {
+        code.to_string()
+    };
     log::info!(
-        "API proxy route={route} status={}",
-        status.as_u16(),
+        "\x1b[36mAPI proxy\x1b[0m route=\x1b[33m{route}\x1b[0m status={status_painted}",
     );
 }
 
