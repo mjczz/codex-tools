@@ -635,9 +635,9 @@ fn refresh_usage_worker_count(target_count: usize) -> usize {
     let available_memory_mib = available_system_memory_mib();
     let worker_count =
         refresh_usage_worker_count_from_resources(target_count, cpu_count, available_memory_mib);
-    log::info!(
-        "账号刷新 worker_count={worker_count} target_count={target_count} cpu_count={cpu_count} available_memory_mib={available_memory_mib:?}"
-    );
+    // log::info!(
+    //     "账号刷新 worker_count={worker_count} target_count={target_count} cpu_count={cpu_count} available_memory_mib={available_memory_mib:?}"
+    // );
     worker_count
 }
 
