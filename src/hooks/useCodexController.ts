@@ -12,6 +12,7 @@ import type {
   AccountSummary,
   ApiProxyKey,
   ApiProxyKeyUsageLogEntry,
+  ApiProxyRequestLogEntry,
   ApiProxyStatus,
   ApiProxyUsageMetric,
   ApiProxyUsageRange,
@@ -80,6 +81,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   apiProxyLoadBalanceMode: "average",
   apiProxySequentialFiveHourLimitPercent: 80,
   apiProxyDisabledModels: [],
+  apiProxyRequestBodyEnabled: true,
+  apiProxyRequestBodyDir: null,
   codexAnalyticsWeeklyBudgetUsd: null,
   remoteServers: [],
   locale: DEFAULT_LOCALE,
@@ -216,6 +219,13 @@ export function useCodexController() {
   const [apiProxyKeyLogs, setApiProxyKeyLogs] = useState<
     ApiProxyKeyUsageLogEntry[]
   >([]);
+  const [apiProxyRequestLogs, setApiProxyRequestLogs] = useState<
+    ApiProxyRequestLogEntry[]
+  >([]);
+  const [apiProxyRequestLogsLoading, setApiProxyRequestLogsLoading] =
+    useState(false);
+  const [apiProxyRequestLogsClearing, setApiProxyRequestLogsClearing] =
+    useState(false);
   const [apiProxyKeysLoading, setApiProxyKeysLoading] = useState(true);
   const [apiProxySupportedModels, setApiProxySupportedModels] = useState<
     string[]
@@ -510,6 +520,70 @@ export function useCodexController() {
         if (options?.silent !== true) {
           setApiProxyKeyLogs([]);
         }
+      }
+    },
+    [],
+  );
+
+  const loadApiProxyRequestLogs = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!options?.silent) {
+        setApiProxyRequestLogsLoading(true);
+      }
+      try {
+        const data = await invoke<ApiProxyRequestLogEntry[]>(
+          "get_api_proxy_request_logs",
+          {
+            limit: 200,
+          },
+        );
+        setApiProxyRequestLogs(Array.isArray(data) ? data : []);
+      } catch {
+        if (options?.silent !== true) {
+          setApiProxyRequestLogs([]);
+        }
+      } finally {
+        if (!options?.silent) {
+          setApiProxyRequestLogsLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  const clearApiProxyRequestLogs = useCallback(async () => {
+    if (apiProxyRequestLogsClearing) {
+      return;
+    }
+    setApiProxyRequestLogsClearing(true);
+    try {
+      await invoke("clear_api_proxy_request_logs");
+      setApiProxyRequestLogs([]);
+    } catch (error) {
+      setNotice({
+        type: "error",
+        message: copy.notices.updateSettingsFailed(String(error)),
+      });
+    } finally {
+      setApiProxyRequestLogsClearing(false);
+    }
+  }, [apiProxyRequestLogsClearing, copy.notices]);
+
+  const fetchApiProxyRequestBody = useCallback(
+    async (logId: string) => {
+      console.log("[proxy][get_body] invoke start", { logId });
+      try {
+        const result = await invoke<string>("get_api_proxy_request_body", {
+          logId,
+        });
+        console.log("[proxy][get_body] invoke ok", {
+          logId,
+          bytes: result.length,
+        });
+        return result;
+      } catch (error) {
+        console.error("[proxy][get_body] invoke failed", { logId, error });
+        throw error;
       }
     },
     [],
@@ -1051,6 +1125,7 @@ export function useCodexController() {
         await loadApiProxySupportedModels();
         await loadApiProxyKeys();
         await loadApiProxyKeyLogs();
+        await loadApiProxyRequestLogs();
         await loadSettings();
         const initialAccounts = await loadAccounts();
         maybeShowProfileIntegrityNotice(initialAccounts);
@@ -1106,6 +1181,9 @@ export function useCodexController() {
     checkForAppUpdate,
     loadAccounts,
     loadApiProxyKeyLogs,
+    loadApiProxyRequestLogs,
+    clearApiProxyRequestLogs,
+    fetchApiProxyRequestBody,
     loadApiProxyKeys,
     loadApiProxySupportedModels,
     loadApiProxyStatus,
@@ -1238,6 +1316,7 @@ export function useCodexController() {
     const timer = setInterval(() => {
       void loadApiProxyUsageStats(apiProxyUsageRange, { silent: true });
       void loadApiProxyKeyLogs({ silent: true });
+      void loadApiProxyRequestLogs({ silent: true });
     }, API_PROXY_USAGE_POLL_MS);
 
     return () => {
@@ -1249,6 +1328,7 @@ export function useCodexController() {
     apiProxyUsageLoading,
     apiProxyUsageRange,
     loadApiProxyKeyLogs,
+    loadApiProxyRequestLogs,
     loadApiProxyUsageStats,
   ]);
 
@@ -2652,6 +2732,9 @@ export function useCodexController() {
     apiProxyStatus,
     apiProxyKeys,
     apiProxyKeyLogs,
+    apiProxyRequestLogs,
+    apiProxyRequestLogsLoading,
+    apiProxyRequestLogsClearing,
     apiProxyKeysLoading,
     apiProxyUsageStats,
     apiProxyUsageRange,
@@ -2724,6 +2807,9 @@ export function useCodexController() {
     onImportAuthFiles,
     onExportAccounts,
     loadApiProxyStatus,
+    loadApiProxyRequestLogs,
+    clearApiProxyRequestLogs,
+    fetchApiProxyRequestBody,
     onSelectApiProxyUsageRange,
     onSelectApiProxyUsageMetric,
     onClearApiProxyUsageStats,

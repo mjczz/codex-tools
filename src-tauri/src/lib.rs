@@ -41,6 +41,7 @@ use tauri::WindowEvent;
 use models::AccountSummary;
 use models::ApiProxyKey;
 use models::ApiProxyKeyUsageLogEntry;
+use models::ApiProxyRequestLogEntry;
 use models::ApiProxyStatus;
 use models::ApiProxyUsageStats;
 use models::AppSettings;
@@ -1853,6 +1854,33 @@ async fn get_api_proxy_key_usage_logs(
 }
 
 #[tauri::command]
+async fn get_api_proxy_request_logs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<ApiProxyRequestLogEntry>, String> {
+    proxy_service::get_api_proxy_request_logs_internal(&app, state.inner(), limit).await
+}
+
+#[tauri::command]
+async fn clear_api_proxy_request_logs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    proxy_service::clear_api_proxy_request_logs_internal(&app, state.inner()).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_api_proxy_request_body(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    log_id: String,
+) -> Result<String, String> {
+    log::debug!("get_api_proxy_request_body called log_id={log_id:?}");
+    proxy_service::get_api_proxy_request_body_internal(&app, state.inner(), &log_id).await
+}
+
+#[tauri::command]
 async fn get_api_proxy_usage_stats(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2241,6 +2269,13 @@ pub fn run() {
             if let Err(err) = settings_service::sync_autostart_from_store(app.handle()) {
                 log::warn!("启动时同步开机启动状态失败: {err}");
             }
+            // 把磁盘上的 settings 灌进 AppState 内存锁,让运行中的代理在请求路径上读到最新值
+            {
+                let state = app.state::<AppState>();
+                if let Err(err) = settings_service::hydrate_settings_from_store(app.handle(), &state) {
+                    log::warn!("启动时加载 settings 失败: {err}");
+                }
+            }
             // 启动阶段先同步当前本机登录账号，再初始化状态栏，保证首次展示即一致。
             store::sync_current_auth_account_on_startup(app.handle())?;
             setup_macos_app_menu(app.handle())?;
@@ -2288,6 +2323,9 @@ pub fn run() {
             delete_api_proxy_key,
             regenerate_api_proxy_key,
             get_api_proxy_key_usage_logs,
+            get_api_proxy_request_logs,
+            get_api_proxy_request_body,
+            clear_api_proxy_request_logs,
             get_api_proxy_usage_stats,
             clear_api_proxy_usage_stats,
             get_api_proxy_supported_models,

@@ -1,10 +1,12 @@
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 
+use crate::models::AppSettings;
 use crate::proxy_service::new_proxy_storage_context;
 use crate::proxy_service::start_api_proxy_with_runtime;
 use crate::proxy_service::stop_api_proxy_with_runtime;
@@ -51,6 +53,7 @@ pub async fn run_proxy_daemon(options: ProxyDaemonOptions) -> Result<(), String>
         store_lock,
         auth_refresh_lock,
         false,
+        Arc::new(RwLock::new(AppSettings::default())),
     );
     let status =
         start_api_proxy_with_runtime(&storage, &runtime_slot, options.port, &options.host).await?;

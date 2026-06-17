@@ -56,6 +56,9 @@ function App() {
     apiProxyStatus,
     apiProxyKeys,
     apiProxyKeyLogs,
+    apiProxyRequestLogs,
+    apiProxyRequestLogsLoading,
+    apiProxyRequestLogsClearing,
     apiProxyKeysLoading,
     apiProxyUsageStats,
     apiProxyUsageRange,
@@ -113,6 +116,9 @@ function App() {
     onSelectApiProxyUsageRange,
     onSelectApiProxyUsageMetric,
     onClearApiProxyUsageStats,
+    loadApiProxyRequestLogs: onRefreshApiProxyRequestLogs,
+    clearApiProxyRequestLogs: onClearApiProxyRequestLogs,
+    fetchApiProxyRequestBody,
     onStartApiProxy,
     onStopApiProxy,
     onRefreshApiProxyKey,
@@ -330,6 +336,9 @@ function App() {
               status={apiProxyStatus}
               apiProxyKeys={apiProxyKeys}
               apiProxyKeyLogs={apiProxyKeyLogs}
+              apiProxyRequestLogs={apiProxyRequestLogs}
+              apiProxyRequestLogsLoading={apiProxyRequestLogsLoading}
+              apiProxyRequestLogsClearing={apiProxyRequestLogsClearing}
               apiProxyKeysLoading={apiProxyKeysLoading}
               apiProxyUsageStats={apiProxyUsageStats}
               apiProxyUsageRange={apiProxyUsageRange}
@@ -346,6 +355,8 @@ function App() {
               }
               apiProxySupportedModels={apiProxySupportedModels}
               apiProxyDisabledModels={settings.apiProxyDisabledModels}
+              requestBodyEnabled={settings.apiProxyRequestBodyEnabled}
+              requestBodyDir={settings.apiProxyRequestBodyDir}
               remoteServers={settings.remoteServers}
               remoteStatuses={remoteProxyStatuses}
               remoteLogs={remoteProxyLogs}
@@ -375,6 +386,9 @@ function App() {
               onSelectApiProxyUsageRange={onSelectApiProxyUsageRange}
               onSelectApiProxyUsageMetric={onSelectApiProxyUsageMetric}
               onClearApiProxyUsageStats={onClearApiProxyUsageStats}
+              onRefreshRequestLogs={() => void onRefreshApiProxyRequestLogs()}
+              onClearRequestLogs={() => void onClearApiProxyRequestLogs()}
+              onFetchFullBody={fetchApiProxyRequestBody}
               onRefreshApiKey={() => void onRefreshApiProxyKey()}
               onBindCodexProxy={() => void onBindCodexToApiProxy()}
               onRestoreCodexProxy={() => void onRestoreCodexProxyBinding()}
@@ -406,6 +420,18 @@ function App() {
               onUpdateApiProxyDisabledModels={(models) =>
                 updateSettings(
                   { apiProxyDisabledModels: models },
+                  { silent: true, keepInteractive: true },
+                )
+              }
+              onUpdateRequestBodyDir={(dir) =>
+                updateSettings(
+                  { apiProxyRequestBodyDir: dir },
+                  { silent: true, keepInteractive: true },
+                )
+              }
+              onUpdateRequestBodyEnabled={(enabled) =>
+                updateSettings(
+                  { apiProxyRequestBodyEnabled: enabled },
                   { silent: true, keepInteractive: true },
                 )
               }
