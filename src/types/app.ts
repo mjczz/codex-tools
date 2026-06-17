@@ -274,6 +274,55 @@ export type ApiProxyKeyUsageLogEntry = {
   tokens: number;
 };
 
+export type ApiProxyRequestLogHeader = {
+  name: string;
+  value: string;
+};
+
+export type RequestLogBodySummary = {
+  totalBytes: number;
+  model: string | null;
+  maxTokens: number | null;
+  temperature: number | null;
+  topP: number | null;
+  stream: boolean | null;
+  systemBytes: number;
+  systemPreview: string | null;
+  toolCount: number;
+  toolNames: string[];
+  toolsBytes: number;
+  messageCount: number;
+  userMessageCount: number;
+  assistantMessageCount: number;
+  messagesBytes: number;
+  attachmentCount: number;
+  attachmentsBytes: number;
+  otherBytes: number;
+};
+
+export type ApiProxyRequestLogEntry = {
+  id: string;
+  timestamp: number;
+  method: string;
+  path: string;
+  route: string | null;
+  status: number;
+  durationMs: number;
+  keyId: string | null;
+  keyLabel: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  serviceTier: string | null;
+  clientIp: string | null;
+  userAgent: string | null;
+  requestHeaders: ApiProxyRequestLogHeader[];
+  bodySummary: RequestLogBodySummary;
+  bodyFile: string | null;
+  responseExcerpt: string | null;
+  responseTruncated: boolean;
+  error: string | null;
+};
+
 export type ApiProxyUsageRange = "1h" | "24h" | "7d" | "14d" | "30d";
 
 export type ApiProxyUsageMetric = "calls" | "tokens";
@@ -422,6 +471,8 @@ export type AppSettings = {
   apiProxyLoadBalanceMode: ApiProxyLoadBalanceMode;
   apiProxySequentialFiveHourLimitPercent: number;
   apiProxyDisabledModels: string[];
+  apiProxyRequestBodyEnabled: boolean;
+  apiProxyRequestBodyDir: string | null;
   codexAnalyticsWeeklyBudgetUsd: number | null;
   remoteServers: RemoteServerConfig[];
   locale: AppLocale;

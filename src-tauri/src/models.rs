@@ -20,6 +20,10 @@ pub(crate) fn default_api_proxy_sequential_five_hour_limit_percent() -> f64 {
     80.0
 }
 
+fn default_api_proxy_request_body_enabled() -> bool {
+    true
+}
+
 pub(crate) fn normalize_api_proxy_sequential_five_hour_limit_percent(value: f64) -> f64 {
     if value.is_finite() {
         value.clamp(0.0, 100.0)
@@ -356,6 +360,88 @@ pub(crate) struct ApiProxyKeyUsageLogEntry {
     pub(crate) tokens: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct RequestLogBodySummary {
+    pub(crate) total_bytes: u64,
+    pub(crate) model: Option<String>,
+    pub(crate) max_tokens: Option<i64>,
+    pub(crate) temperature: Option<f64>,
+    pub(crate) top_p: Option<f64>,
+    pub(crate) stream: Option<bool>,
+    pub(crate) system_bytes: u64,
+    pub(crate) system_preview: Option<String>,
+    pub(crate) tool_count: u32,
+    pub(crate) tool_names: Vec<String>,
+    pub(crate) tools_bytes: u64,
+    pub(crate) message_count: u32,
+    pub(crate) user_message_count: u32,
+    pub(crate) assistant_message_count: u32,
+    pub(crate) messages_bytes: u64,
+    pub(crate) attachment_count: u32,
+    pub(crate) attachments_bytes: u64,
+    pub(crate) other_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct ApiProxyRequestLogEntry {
+    pub(crate) id: String,
+    pub(crate) timestamp: i64,
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) route: Option<String>,
+    pub(crate) status: u16,
+    pub(crate) duration_ms: i64,
+    pub(crate) key_id: Option<String>,
+    pub(crate) key_label: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) service_tier: Option<String>,
+    pub(crate) client_ip: Option<String>,
+    pub(crate) user_agent: Option<String>,
+    pub(crate) request_headers: Vec<ApiProxyRequestLogHeader>,
+    pub(crate) body_summary: RequestLogBodySummary,
+    pub(crate) body_file: Option<String>,
+    pub(crate) response_excerpt: Option<String>,
+    pub(crate) response_truncated: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl Default for ApiProxyRequestLogEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            timestamp: 0,
+            method: String::new(),
+            path: String::new(),
+            route: None,
+            status: 0,
+            duration_ms: 0,
+            key_id: None,
+            key_label: None,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            client_ip: None,
+            user_agent: None,
+            request_headers: Vec::new(),
+            body_summary: RequestLogBodySummary::default(),
+            body_file: None,
+            response_excerpt: None,
+            response_truncated: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiProxyRequestLogHeader {
+    pub(crate) name: String,
+    pub(crate) value: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiProxyUsagePoint {
@@ -552,6 +638,10 @@ pub(crate) struct AppSettings {
     pub(crate) api_proxy_sequential_five_hour_limit_percent: f64,
     #[serde(default)]
     pub(crate) api_proxy_disabled_models: Vec<String>,
+    #[serde(default = "default_api_proxy_request_body_enabled")]
+    pub(crate) api_proxy_request_body_enabled: bool,
+    #[serde(default)]
+    pub(crate) api_proxy_request_body_dir: Option<String>,
     #[serde(default)]
     pub(crate) codex_analytics_weekly_budget_usd: Option<f64>,
     #[serde(default)]
@@ -582,6 +672,8 @@ impl Default for AppSettings {
             api_proxy_sequential_five_hour_limit_percent:
                 default_api_proxy_sequential_five_hour_limit_percent(),
             api_proxy_disabled_models: Vec::new(),
+            api_proxy_request_body_enabled: default_api_proxy_request_body_enabled(),
+            api_proxy_request_body_dir: None,
             codex_analytics_weekly_budget_usd: None,
             api_proxy_sequential_account_key: None,
             remote_servers: Vec::new(),
@@ -610,6 +702,8 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) api_proxy_load_balance_mode: Option<ApiProxyLoadBalanceMode>,
     pub(crate) api_proxy_sequential_five_hour_limit_percent: Option<f64>,
     pub(crate) api_proxy_disabled_models: Option<Vec<String>>,
+    pub(crate) api_proxy_request_body_enabled: Option<bool>,
+    pub(crate) api_proxy_request_body_dir: Option<Option<String>>,
     pub(crate) codex_analytics_weekly_budget_usd: Option<Option<f64>>,
     pub(crate) remote_servers: Option<Vec<RemoteServerConfig>>,
     pub(crate) locale: Option<AppLocale>,

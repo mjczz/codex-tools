@@ -9,14 +9,18 @@ import {
   type CSSProperties,
 } from "react";
 import { createPortal } from "react-dom";
+import { invoke } from "@tauri-apps/api/core";
 
 import { useI18n } from "../i18n/I18nProvider";
 import type { MessageCatalog } from "../i18n/catalog";
 import { EditorMultiSelect, type MultiSelectOption } from "./EditorMultiSelect";
+import { SwitchField } from "./SwitchField";
 import type {
   ApiProxyStatus,
   ApiProxyKey,
   ApiProxyKeyUsageLogEntry,
+  ApiProxyRequestLogEntry,
+  RequestLogBodySummary,
   ApiProxyUsageMetric,
   ApiProxyUsageRange,
   ApiProxyUsageStats,
@@ -58,6 +62,9 @@ type ApiProxyPanelProps = {
   status: ApiProxyStatus;
   apiProxyKeys: ApiProxyKey[];
   apiProxyKeyLogs: ApiProxyKeyUsageLogEntry[];
+  apiProxyRequestLogs: ApiProxyRequestLogEntry[];
+  apiProxyRequestLogsLoading: boolean;
+  apiProxyRequestLogsClearing: boolean;
   apiProxyKeysLoading: boolean;
   apiProxyUsageStats: ApiProxyUsageStats | null;
   apiProxyUsageRange: ApiProxyUsageRange;
@@ -72,6 +79,8 @@ type ApiProxyPanelProps = {
   sequentialFiveHourLimitPercent: number;
   apiProxySupportedModels: string[];
   apiProxyDisabledModels: string[];
+  requestBodyEnabled: boolean;
+  requestBodyDir: string | null;
   remoteServers: RemoteServerConfig[];
   remoteStatuses: Record<string, RemoteProxyStatus>;
   remoteLogs: Record<string, string>;
@@ -101,6 +110,9 @@ type ApiProxyPanelProps = {
   onSelectApiProxyUsageRange: (range: ApiProxyUsageRange) => void;
   onSelectApiProxyUsageMetric: (metric: ApiProxyUsageMetric) => void;
   onClearApiProxyUsageStats: () => void;
+  onRefreshRequestLogs: () => void;
+  onClearRequestLogs: () => void;
+  onFetchFullBody: (logId: string) => Promise<string>;
   onRefreshApiKey: () => void;
   onBindCodexProxy: () => void;
   onRestoreCodexProxy: () => void;
@@ -110,6 +122,8 @@ type ApiProxyPanelProps = {
   onUpdateLoadBalanceMode: (mode: ApiProxyLoadBalanceMode) => Promise<void> | void;
   onUpdateSequentialFiveHourLimitPercent: (percent: number) => Promise<void> | void;
   onUpdateApiProxyDisabledModels: (models: string[]) => Promise<void> | void;
+  onUpdateRequestBodyDir: (dir: string | null) => Promise<void> | void;
+  onUpdateRequestBodyEnabled: (enabled: boolean) => Promise<void> | void;
   onUpdateRemoteServers: (servers: RemoteServerConfig[]) => void;
   onRefreshRemoteStatus: (server: RemoteServerConfig) => void;
   onDeployRemote: (server: RemoteServerConfig) => void;
@@ -1665,10 +1679,801 @@ function ApiProxyUsageChart({
   );
 }
 
+type ApiProxyRequestLogsSectionProps = {
+  copy: MessageCatalog["apiProxy"];
+  locale: string;
+  entries: ApiProxyRequestLogEntry[];
+  loading: boolean;
+  clearing: boolean;
+  onRefresh: () => void;
+  onClear: () => void;
+  onFetchFullBody: (logId: string) => Promise<string>;
+};
+
+const REQUEST_LOG_STATUS_TEXT_CLASS: Record<string, string> = {
+  success: "isSuccess",
+  redirect: "isRedirect",
+  clientError: "isClientError",
+  serverError: "isServerError",
+  unknown: "isUnknown",
+};
+
+function classifyRequestLogStatus(
+  status: number,
+): "success" | "redirect" | "clientError" | "serverError" | "unknown" {
+  if (status >= 200 && status < 300) {
+    return "success";
+  }
+  if (status >= 300 && status < 400) {
+    return "redirect";
+  }
+  if (status >= 400 && status < 500) {
+    return "clientError";
+  }
+  if (status >= 500 && status < 600) {
+    return "serverError";
+  }
+  return "unknown";
+}
+
+function formatRequestLogDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "—";
+  }
+  if (durationMs < 1_000) {
+    return `${durationMs} ms`;
+  }
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 2 : 1)} s`;
+  }
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.round((durationMs % 60_000) / 1_000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatRequestLogTimestamp(locale: string, timestampSec: number): string {
+  if (!Number.isFinite(timestampSec) || timestampSec <= 0) {
+    return "—";
+  }
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(new Date(timestampSec * 1000));
+  } catch {
+    return new Date(timestampSec * 1000).toLocaleString(locale);
+  }
+}
+
+function formatRequestLogDate(locale: string, timestampSec: number): string {
+  if (!Number.isFinite(timestampSec) || timestampSec <= 0) {
+    return "";
+  }
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(timestampSec * 1000));
+  } catch {
+    return new Date(timestampSec * 1000).toLocaleString(locale);
+  }
+}
+
+function requestLogStatusLabel(
+  copy: MessageCatalog["apiProxy"],
+  classification: ReturnType<typeof classifyRequestLogStatus>,
+): string {
+  if (classification === "success") {
+    return copy.requestLogsStatusSuccess;
+  }
+  if (classification === "redirect") {
+    return copy.requestLogsStatusRedirect;
+  }
+  if (classification === "clientError") {
+    return copy.requestLogsStatusClientError;
+  }
+  if (classification === "serverError") {
+    return copy.requestLogsStatusServerError;
+  }
+  return copy.requestLogsStatusUnknown;
+}
+
+function ApiProxyRequestLogsSection({
+  copy,
+  locale,
+  entries,
+  loading,
+  clearing,
+  onRefresh,
+  onClear,
+  onFetchFullBody,
+}: ApiProxyRequestLogsSectionProps) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [bodyViewer, setBodyViewer] = useState<{
+    entry: ApiProxyRequestLogEntry;
+    content: string | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+
+  const handleCopy = useCallback(
+    (key: string, value: string) => {
+      copyText(value);
+      setCopiedField(key);
+      window.setTimeout(() => {
+        setCopiedField((current) => (current === key ? null : current));
+      }, 1_500);
+    },
+    [],
+  );
+
+  const handleViewFullBody = useCallback(
+    (entry: ApiProxyRequestLogEntry) => {
+      if (!entry.bodyFile) {
+        setBodyViewer({ entry, content: null, loading: false, error: copy.requestLogsNoBodyFile });
+        return;
+      }
+      // 用 bodyFile 的文件名（req-xxx-yy.json）作为 id，
+      // 避免任何 entry.id 与 body 文件名不一致的边角情况。
+      const fileName = entry.bodyFile.split(/[\\/]/).pop() ?? "";
+      const logId = fileName.replace(/\.json$/i, "");
+      console.log("[proxy][get_body] click", {
+        entryId: entry.id,
+        bodyFile: entry.bodyFile,
+        resolvedLogId: logId,
+      });
+      setBodyViewer({ entry, content: null, loading: true, error: null });
+      void onFetchFullBody(logId)
+        .then((content) => {
+          setBodyViewer((current) =>
+            current && current.entry.id === entry.id
+              ? { ...current, content, loading: false, error: null }
+              : current,
+          );
+        })
+        .catch((error) => {
+          setBodyViewer((current) =>
+            current && current.entry.id === entry.id
+              ? {
+                  ...current,
+                  content: null,
+                  loading: false,
+                  error: String(error),
+                }
+              : current,
+          );
+        });
+    },
+    [onFetchFullBody, copy.requestLogsNoBodyFile],
+  );
+
+  const handleCloseBodyViewer = useCallback(() => {
+    setBodyViewer(null);
+  }, []);
+
+  const orderedEntries = useMemo(() => entries, [entries]);
+  const totalEntries = orderedEntries.length;
+
+  return (
+    <section className="proxySectionCard proxyRequestLogsCard">
+      <header className="proxyRequestLogsHeader">
+        <div className="proxyRequestLogsHeading">
+          <span className="proxyLabel">{copy.kicker}</span>
+          <h3>{copy.requestLogsTitle}</h3>
+          <p className="proxyRequestLogsDescription">
+            {copy.requestLogsDescription}
+          </p>
+        </div>
+        <div className="proxyRequestLogsActions">
+          <button
+            type="button"
+            className="ghost"
+            onClick={onRefresh}
+            disabled={loading}
+          >
+            {copy.requestLogsRefresh}
+          </button>
+          <button
+            type="button"
+            className="ghost danger"
+            onClick={onClear}
+            disabled={clearing || totalEntries === 0}
+          >
+            {clearing ? copy.requestLogsClearing : copy.requestLogsClear}
+          </button>
+        </div>
+      </header>
+
+      <div
+        className={`proxyRequestLogsTableFrame${loading ? " isLoading" : ""}`}
+        aria-busy={loading}
+      >
+        {totalEntries === 0 ? (
+          <div className="proxyRequestLogsEmpty">
+            {loading ? copy.requestLogsLoading : copy.requestLogsEmpty}
+          </div>
+        ) : (
+          <table className="proxyRequestLogsTable">
+            <thead>
+              <tr>
+                <th scope="col">{copy.requestLogsColumns.time}</th>
+                <th scope="col">{copy.requestLogsColumns.method}</th>
+                <th scope="col">{copy.requestLogsColumns.path}</th>
+                <th scope="col">{copy.requestLogsColumns.status}</th>
+                <th scope="col">{copy.requestLogsColumns.duration}</th>
+                <th scope="col">{copy.requestLogsColumns.model}</th>
+                <th scope="col">{copy.requestLogsColumns.key}</th>
+                <th scope="col" aria-label="expand" />
+              </tr>
+            </thead>
+            <tbody>
+              {orderedEntries.map((entry) => {
+                const isExpanded = expandedId === entry.id;
+                const classification = classifyRequestLogStatus(entry.status);
+                const statusClass =
+                  REQUEST_LOG_STATUS_TEXT_CLASS[classification] ?? "isUnknown";
+                const keyLabel = entry.keyLabel?.trim() || entry.keyId || "—";
+                return (
+                  <ApiProxyRequestLogRow
+                    key={entry.id}
+                    entry={entry}
+                    isExpanded={isExpanded}
+                    copy={copy}
+                    locale={locale}
+                    statusClass={statusClass}
+                    statusLabel={requestLogStatusLabel(copy, classification)}
+                    keyLabel={keyLabel}
+                    copiedField={copiedField}
+                    onToggle={() =>
+                      setExpandedId((current) =>
+                        current === entry.id ? null : entry.id,
+                      )
+                    }
+                    onCopy={handleCopy}
+                    onViewFullBody={handleViewFullBody}
+                    fullBodyLoading={
+                      bodyViewer?.entry.id === entry.id && bodyViewer.loading
+                    }
+                  />
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {bodyViewer ? (
+        <RequestLogBodyViewer
+          copy={copy}
+          locale={locale}
+          entry={bodyViewer.entry}
+          content={bodyViewer.content}
+          loading={bodyViewer.loading}
+          error={bodyViewer.error}
+          onClose={handleCloseBodyViewer}
+          onCopy={handleCopy}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+type ApiProxyRequestLogRowProps = {
+  entry: ApiProxyRequestLogEntry;
+  isExpanded: boolean;
+  copy: MessageCatalog["apiProxy"];
+  locale: string;
+  statusClass: string;
+  statusLabel: string;
+  keyLabel: string;
+  copiedField: string | null;
+  onToggle: () => void;
+  onCopy: (key: string, value: string) => void;
+  onViewFullBody: (entry: ApiProxyRequestLogEntry) => void;
+  fullBodyLoading: boolean;
+};
+
+function ApiProxyRequestLogRow({
+  entry,
+  isExpanded,
+  copy,
+  locale,
+  statusClass,
+  statusLabel,
+  keyLabel,
+  copiedField,
+  onToggle,
+  onCopy,
+  onViewFullBody,
+  fullBodyLoading,
+}: ApiProxyRequestLogRowProps) {
+  const summary = entry.bodySummary;
+  const responseJson = entry.responseExcerpt ?? "";
+
+  return (
+    <>
+      <tr
+        className={`proxyRequestLogRow${isExpanded ? " isExpanded" : ""}`}
+        onClick={onToggle}
+      >
+        <td className="proxyRequestLogTime">
+          <span title={formatRequestLogDate(locale, entry.timestamp)}>
+            {formatRequestLogTimestamp(locale, entry.timestamp)}
+          </span>
+        </td>
+        <td>
+          <span className="proxyRequestLogMethod">{entry.method}</span>
+        </td>
+        <td className="proxyRequestLogPath" title={entry.path}>
+          {entry.path}
+        </td>
+        <td>
+          <span
+            className={`proxyRequestLogStatus ${statusClass}`}
+            title={statusLabel}
+          >
+            {entry.status > 0 ? entry.status : "—"}
+          </span>
+        </td>
+        <td>{formatRequestLogDuration(entry.durationMs)}</td>
+        <td className="proxyRequestLogModel" title={entry.model ?? ""}>
+          {entry.model ?? "—"}
+        </td>
+        <td className="proxyRequestLogKey" title={keyLabel}>
+          {keyLabel}
+        </td>
+        <td className="proxyRequestLogToggle">
+          <span aria-hidden="true">{isExpanded ? "▾" : "▸"}</span>
+          <span className="visuallyHidden">
+            {isExpanded ? copy.requestLogsCollapse : copy.requestLogsExpand}
+          </span>
+        </td>
+      </tr>
+      {isExpanded ? (
+        <tr className="proxyRequestLogDetail">
+          <td colSpan={8}>
+            <div className="proxyRequestLogDetailGrid">
+              <RequestLogSummaryBlock
+                copy={copy}
+                summary={summary}
+                bodyFile={entry.bodyFile}
+                fullBodyLoading={fullBodyLoading}
+                onViewFullBody={() => onViewFullBody(entry)}
+              />
+              <RequestLogDetailBlock
+                title={copy.requestLogsRequestHeaders}
+                text={
+                  entry.requestHeaders.length > 0
+                    ? entry.requestHeaders
+                        .map((header) => `${header.name}: ${header.value}`)
+                        .join("\n")
+                    : "—"
+                }
+                copyKey={`headers-${entry.id}`}
+                copiedField={copiedField}
+                copyLabel={copy.requestLogsCopy}
+                copiedLabel={copy.requestLogsCopied}
+                onCopy={onCopy}
+              />
+              {responseJson ? (
+                <RequestLogDetailBlock
+                  title={copy.requestLogsResponseExcerpt}
+                  text={responseJson}
+                  copyKey={`response-${entry.id}`}
+                  copiedField={copiedField}
+                  copyLabel={copy.requestLogsCopy}
+                  copiedLabel={copy.requestLogsCopied}
+                  onCopy={onCopy}
+                  trailing={
+                    entry.responseTruncated
+                      ? ` ${copy.requestLogsTruncated}`
+                      : ""
+                  }
+                />
+              ) : null}
+            </div>
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+type RequestLogDetailBlockProps = {
+  title: string;
+  text: string;
+  copyKey: string;
+  copiedField: string | null;
+  copyLabel: string;
+  copiedLabel: string;
+  trailing?: string;
+  onCopy: (key: string, value: string) => void;
+};
+
+function RequestLogDetailBlock({
+  title,
+  text,
+  copyKey,
+  copiedField,
+  copyLabel,
+  copiedLabel,
+  trailing,
+  onCopy,
+}: RequestLogDetailBlockProps) {
+  const isCopied = copiedField === copyKey;
+  return (
+    <div className="proxyRequestLogDetailBlock">
+      <div className="proxyRequestLogDetailHeader">
+        <span className="proxyLabel">{title}</span>
+        <button
+          type="button"
+          className="ghost proxyCopyButton"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCopy(copyKey, text);
+          }}
+        >
+          {isCopied ? copiedLabel : copyLabel}
+        </button>
+      </div>
+      <pre className="proxyRequestLogDetailBody">
+        {text}
+        {trailing}
+      </pre>
+    </div>
+  );
+}
+
+type RequestLogSummaryBlockProps = {
+  copy: MessageCatalog["apiProxy"];
+  summary: RequestLogBodySummary;
+  bodyFile: string | null;
+  fullBodyLoading: boolean;
+  onViewFullBody: () => void;
+};
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 2 : 1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function RequestLogSummaryBlock({
+  copy,
+  summary,
+  bodyFile,
+  fullBodyLoading,
+  onViewFullBody,
+}: RequestLogSummaryBlockProps) {
+  const rows: Array<{ label: string; bytes: number; extra?: string }> = [
+    {
+      label: copy.requestLogsBreakdownSystem,
+      bytes: summary.systemBytes,
+    },
+    {
+      label: copy.requestLogsBreakdownTools,
+      bytes: summary.toolsBytes,
+      extra:
+        summary.toolCount > 0
+          ? `${summary.toolCount} (${summary.toolNames.slice(0, 4).join(", ")}${
+              summary.toolCount > 4 ? "…" : ""
+            })`
+          : undefined,
+    },
+    {
+      label: copy.requestLogsBreakdownMessages,
+      bytes: summary.messagesBytes,
+      extra: `${summary.userMessageCount}+${summary.assistantMessageCount}`,
+    },
+    {
+      label: copy.requestLogsBreakdownAttachments,
+      bytes: summary.attachmentsBytes,
+      extra:
+        summary.attachmentCount > 0
+          ? `${summary.attachmentCount}`
+          : undefined,
+    },
+    {
+      label: copy.requestLogsBreakdownOther,
+      bytes: summary.otherBytes,
+    },
+  ];
+
+  return (
+    <div className="proxyRequestLogDetailBlock">
+      <div className="proxyRequestLogDetailHeader">
+        <span className="proxyLabel">{copy.requestLogsBreakdownTitle}</span>
+        <button
+          type="button"
+          className="ghost proxyCopyButton"
+          onClick={(event) => {
+            event.stopPropagation();
+            onViewFullBody();
+          }}
+          disabled={fullBodyLoading}
+        >
+          {fullBodyLoading
+            ? copy.requestLogsLoadingFullBody
+            : bodyFile
+              ? copy.requestLogsViewFullBody
+              : copy.requestLogsNoBodyFile}
+        </button>
+      </div>
+      <div className="proxyRequestLogBreakdownMeta">
+        <span>
+          {copy.requestLogsBreakdownTotal}: {formatBytes(summary.totalBytes)}
+        </span>
+        {summary.model ? (
+          <span className="proxyRequestLogBreakdownMetaItem">
+            {copy.requestLogsBreakdownModel}: <code>{summary.model}</code>
+          </span>
+        ) : null}
+        {summary.maxTokens != null ? (
+          <span className="proxyRequestLogBreakdownMetaItem">
+            max_tokens: <code>{summary.maxTokens}</code>
+          </span>
+        ) : null}
+        {summary.temperature != null ? (
+          <span className="proxyRequestLogBreakdownMetaItem">
+            temperature: <code>{summary.temperature}</code>
+          </span>
+        ) : null}
+      </div>
+      <table className="proxyRequestLogBreakdownTable">
+        <thead>
+          <tr>
+            <th scope="col">{copy.requestLogsBreakdownSection}</th>
+            <th scope="col" className="proxyRequestLogBreakdownSize">
+              {copy.requestLogsBreakdownBytes}
+            </th>
+            <th scope="col">{copy.requestLogsBreakdownBar}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const pct =
+              summary.totalBytes > 0
+                ? Math.min(100, Math.round((row.bytes / summary.totalBytes) * 100))
+                : 0;
+            return (
+              <tr key={row.label}>
+                <td>{row.label}</td>
+                <td className="proxyRequestLogBreakdownSize">
+                  {formatBytes(row.bytes)}
+                  {row.extra ? (
+                    <span className="proxyRequestLogBreakdownExtra">
+                      {" "}
+                      {row.extra}
+                    </span>
+                  ) : null}
+                </td>
+                <td className="proxyRequestLogBreakdownBarCell">
+                  <div
+                    className="proxyRequestLogBreakdownBar"
+                    style={{ width: `${pct}%` }}
+                    aria-hidden="true"
+                  />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {summary.systemPreview ? (
+        <details className="proxyRequestLogSystemPreview">
+          <summary>{copy.requestLogsBreakdownSystemPreview}</summary>
+          <pre className="proxyRequestLogDetailBody">
+            {summary.systemPreview}
+          </pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+type RequestLogBodyViewerProps = {
+  copy: MessageCatalog["apiProxy"];
+  locale: string;
+  entry: ApiProxyRequestLogEntry;
+  content: string | null;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onCopy: (key: string, value: string) => void;
+};
+
+type FormatPhase =
+  | { kind: "raw" }
+  | { kind: "formatting" }
+  | { kind: "ready"; text: string }
+  | { kind: "error"; message: string };
+
+function RequestLogBodyViewer({
+  copy,
+  entry,
+  content,
+  loading,
+  error,
+  onClose,
+  onCopy,
+}: RequestLogBodyViewerProps) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const [formatPhase, setFormatPhase] = useState<FormatPhase>({ kind: "raw" });
+  const [resetKey, setResetKey] = useState(`${entry.id}:${content?.length ?? 0}`);
+  const workerRef = useRef<Worker | null>(null);
+  const requestSeqRef = useRef(0);
+
+  // 切换 body(打开新条目)时,纯 state 重置回 raw 视图
+  const currentResetKey = `${entry.id}:${content?.length ?? 0}`;
+  if (currentResetKey !== resetKey) {
+    setResetKey(currentResetKey);
+    setFormatPhase({ kind: "raw" });
+  }
+
+  // 切换条目时停掉旧 worker
+  useEffect(() => {
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    };
+  }, [resetKey]);
+
+  const startFormat = useCallback(() => {
+    if (!content) return;
+    workerRef.current?.terminate();
+    const worker = new Worker(
+      new URL("./apiProxyBodyFormat.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    const requestId = ++requestSeqRef.current;
+    worker.addEventListener("message", (event: MessageEvent<{ ok: boolean; pretty?: string; error?: string }>) => {
+      if (requestId !== requestSeqRef.current) return;
+      const data = event.data;
+      if (data.ok && typeof data.pretty === "string") {
+        setFormatPhase({ kind: "ready", text: data.pretty });
+      } else {
+        setFormatPhase({
+          kind: "error",
+          message: data.error ?? "format failed",
+        });
+      }
+      worker.terminate();
+      if (workerRef.current === worker) {
+        workerRef.current = null;
+      }
+    });
+    worker.addEventListener("error", (event: ErrorEvent) => {
+      if (requestId !== requestSeqRef.current) return;
+      setFormatPhase({ kind: "error", message: event.message || "worker error" });
+      worker.terminate();
+      if (workerRef.current === worker) {
+        workerRef.current = null;
+      }
+    });
+    workerRef.current = worker;
+    setFormatPhase({ kind: "formatting" });
+    worker.postMessage(content);
+  }, [content]);
+
+  const showRaw = formatPhase.kind === "raw" || formatPhase.kind === "formatting";
+  const displayText =
+    formatPhase.kind === "ready"
+      ? formatPhase.text
+      : formatPhase.kind === "error"
+        ? content ?? ""
+        : content ?? "";
+
+  const copyKey = `full-body-${entry.id}`;
+
+  return (
+    <div
+      className="proxyRequestLogViewerBackdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={copy.requestLogsViewFullBody}
+      onClick={onClose}
+    >
+      <div
+        className="proxyRequestLogViewer"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="proxyRequestLogViewerHeader">
+          <div>
+            <span className="proxyLabel">{copy.requestLogsViewFullBody}</span>
+            <h4>
+              {entry.method} {entry.path}
+            </h4>
+            <span className="proxyRequestLogViewerSub">
+              {formatBytes(entry.bodySummary.totalBytes)} ·{" "}
+              {entry.bodyFile ?? copy.requestLogsNoBodyFile}
+            </span>
+          </div>
+          <div className="proxyRequestLogViewerActions">
+            <button
+              type="button"
+              className={showRaw ? "ghost proxyCopyButton" : "primary proxyCopyButton"}
+              onClick={() => {
+                if (showRaw) {
+                  startFormat();
+                } else {
+                  setFormatPhase({ kind: "raw" });
+                }
+              }}
+              disabled={!content}
+            >
+              {showRaw ? copy.requestLogsFormatJson : copy.requestLogsRawView}
+            </button>
+            <button
+              type="button"
+              className="ghost proxyCopyButton"
+              onClick={() => onCopy(copyKey, displayText)}
+              disabled={!content}
+            >
+              {copy.requestLogsCopy}
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={onClose}
+              aria-label={copy.requestLogsViewerClose}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+        <div className="proxyRequestLogViewerBody">
+          {loading ? (
+            <div className="proxyRequestLogViewerStatus">
+              {copy.requestLogsLoadingFullBody}
+            </div>
+          ) : error ? (
+            <div className="proxyRequestLogViewerStatus isError">{error}</div>
+          ) : formatPhase.kind === "formatting" ? (
+            <div className="proxyRequestLogViewerStatus">
+              {copy.requestLogsFormatting}
+            </div>
+          ) : formatPhase.kind === "error" ? (
+            <>
+              <div className="proxyRequestLogViewerStatus isError">
+                {formatPhase.message}
+              </div>
+              <pre className="proxyRequestLogViewerPre">{content}</pre>
+            </>
+          ) : (
+            <pre className="proxyRequestLogViewerPre">{displayText}</pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ApiProxyPanel({
   status,
   apiProxyKeys,
   apiProxyKeyLogs,
+  apiProxyRequestLogs,
+  apiProxyRequestLogsLoading,
+  apiProxyRequestLogsClearing,
   apiProxyKeysLoading,
   apiProxyUsageStats,
   apiProxyUsageRange,
@@ -1683,6 +2488,8 @@ export function ApiProxyPanel({
   sequentialFiveHourLimitPercent,
   apiProxySupportedModels,
   apiProxyDisabledModels,
+  requestBodyEnabled,
+  requestBodyDir,
   remoteServers,
   remoteStatuses,
   remoteLogs,
@@ -1712,6 +2519,9 @@ export function ApiProxyPanel({
   onSelectApiProxyUsageRange,
   onSelectApiProxyUsageMetric,
   onClearApiProxyUsageStats,
+  onRefreshRequestLogs,
+  onClearRequestLogs,
+  onFetchFullBody,
   onRefreshApiKey,
   onBindCodexProxy,
   onRestoreCodexProxy,
@@ -1721,6 +2531,8 @@ export function ApiProxyPanel({
   onUpdateLoadBalanceMode,
   onUpdateSequentialFiveHourLimitPercent,
   onUpdateApiProxyDisabledModels,
+  onUpdateRequestBodyDir,
+  onUpdateRequestBodyEnabled,
   onUpdateRemoteServers,
   onRefreshRemoteStatus,
   onDeployRemote,
@@ -1773,6 +2585,7 @@ export function ApiProxyPanel({
   );
   const [portDraft, setPortDraft] = useState<string | null>(null);
   const [sequentialLimitDraft, setSequentialLimitDraft] = useState<number | null>(null);
+  const [pickingRequestBodyDir, setPickingRequestBodyDir] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelMenuSaving, setModelMenuSaving] = useState(false);
   const [modelMenuDraft, setModelMenuDraft] = useState<string[]>(() =>
@@ -1902,6 +2715,24 @@ export function ApiProxyPanel({
       setModelMenuSaving(false);
     }
   }, [effectiveModelMenuDraft, modelMenuSaving, onUpdateApiProxyDisabledModels]);
+
+  const handlePickRequestBodyDir = useCallback(async () => {
+    if (pickingRequestBodyDir) {
+      return;
+    }
+    setPickingRequestBodyDir(true);
+    try {
+      const selected = await invoke<string | null>("pick_codex_launch_path", {
+        kind: "directory",
+        currentPath: requestBodyDir,
+      });
+      if (selected) {
+        await onUpdateRequestBodyDir(selected);
+      }
+    } finally {
+      setPickingRequestBodyDir(false);
+    }
+  }, [onUpdateRequestBodyDir, pickingRequestBodyDir, requestBodyDir]);
 
   const handleCreateApiProxyKey = useCallback(async () => {
     await onCreateApiProxyKey({
@@ -2450,6 +3281,17 @@ export function ApiProxyPanel({
           onClear={onClearApiProxyUsageStats}
         />
 
+        <ApiProxyRequestLogsSection
+          copy={proxyCopy}
+          locale={locale}
+          entries={apiProxyRequestLogs}
+          loading={apiProxyRequestLogsLoading}
+          clearing={apiProxyRequestLogsClearing}
+          onRefresh={onRefreshRequestLogs}
+          onClear={onClearRequestLogs}
+          onFetchFullBody={onFetchFullBody}
+        />
+
         <section className="proxySectionCard proxyProxySettingsCard">
           <article className="proxyDetailCard proxyBalanceCard">
             <div className="proxyBalanceHeader">
@@ -2804,6 +3646,55 @@ export function ApiProxyPanel({
                 })}
               </div>
             )}
+          </article>
+
+          <article className="proxyDetailCard">
+            <div className="proxyDetailCardHeader">
+              <span className="proxyLabel">{proxyCopy.requestBodyDirLabel}</span>
+              <ProxyHelpTip label={proxyCopy.requestBodyDirLabel}>
+                {proxyCopy.requestBodyDirHelp}
+              </ProxyHelpTip>
+            </div>
+            <p className="proxyDetailCardDescription">
+              {proxyCopy.requestBodyDirHelp}
+            </p>
+            <div className="settingFieldGroup">
+              {requestBodyDir ? (
+                <span className="settingPathValue">{requestBodyDir}</span>
+              ) : (
+                <span className="settingValueMuted">
+                  {proxyCopy.requestBodyDirDefault}
+                </span>
+              )}
+              <div className="settingActionGroup">
+                {requestBodyDir ? (
+                  <button
+                    type="button"
+                    className="ghost settingPathClearButton"
+                    aria-label={proxyCopy.requestBodyDirClear}
+                    disabled={pickingRequestBodyDir}
+                    onClick={() => void onUpdateRequestBodyDir(null)}
+                  >
+                    ×
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={pickingRequestBodyDir}
+                  onClick={() => void handlePickRequestBodyDir()}
+                >
+                  {proxyCopy.requestBodyDirPick}
+                </button>
+              </div>
+            </div>
+            <SwitchField
+              checked={requestBodyEnabled}
+              onChange={(checked) => onUpdateRequestBodyEnabled(checked)}
+              label={proxyCopy.requestBodyEnabledLabel}
+              checkedText={proxyCopy.requestBodyEnabledOn}
+              uncheckedText={proxyCopy.requestBodyEnabledOff}
+            />
           </article>
 
           {modelMenuOpen

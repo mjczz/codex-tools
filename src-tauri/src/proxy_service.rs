@@ -24,7 +24,9 @@ use axum::extract::ws::WebSocket as AxumWebSocket;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::Multipart;
+use axum::extract::Request;
 use axum::extract::State;
+use axum::middleware::Next;
 use axum::http::HeaderMap;
 use axum::http::Method;
 use axum::http::Response;
@@ -66,6 +68,9 @@ use crate::auth::refresh_chatgpt_auth_tokens_serialized;
 use crate::models::normalize_api_proxy_sequential_five_hour_limit_percent;
 use crate::models::ApiProxyKey;
 use crate::models::ApiProxyKeyUsageLogEntry;
+use crate::models::ApiProxyRequestLogEntry;
+use crate::models::ApiProxyRequestLogHeader;
+use crate::models::RequestLogBodySummary;
 use crate::models::ApiProxyLoadBalanceMode;
 use crate::models::ApiProxyStatus;
 use crate::models::ApiProxyUsagePoint;
@@ -91,6 +96,7 @@ use crate::usage::resolve_chatgpt_base_origin;
 use crate::utils::now_unix_seconds;
 use crate::utils::set_private_permissions;
 use crate::utils::truncate_for_error;
+use crate::utils::try_set_private_permissions;
 
 const DEFAULT_PROXY_PORT: u16 = 8787;
 const DEFAULT_PROXY_REQUEST_BODY_LIMIT_MIB: usize = 512;
@@ -129,6 +135,20 @@ const API_PROXY_USAGE_STORE_VERSION: u8 = 1;
 const API_PROXY_KEYS_FILE_NAME: &str = "api-proxy-keys.json";
 const API_PROXY_KEYS_STORE_VERSION: u8 = 1;
 const API_PROXY_USAGE_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+const API_PROXY_REQUEST_LOG_FILE_NAME: &str = "api-proxy-request-log.json";
+const API_PROXY_REQUEST_LOG_STORE_VERSION: u8 = 2;
+const API_PROXY_REQUEST_LOG_MAX_ENTRIES: usize = 200;
+const API_PROXY_REQUEST_LOG_BODY_DIR: &str = "proxy-request-bodies";
+const API_PROXY_REQUEST_LOG_USER_PREVIEW_CHARS: usize = 200;
+const API_PROXY_REQUEST_LOG_HEADER_DENY_LIST: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "openai-authorization",
+    "openai-organization",
+    "cookie",
+    "proxy-authorization",
+    "x-codex-tools-session",
+];
 const API_PROXY_USAGE_RANGE_1H_SECONDS: i64 = 60 * 60;
 const API_PROXY_USAGE_RANGE_24H_SECONDS: i64 = 24 * 60 * 60;
 const API_PROXY_USAGE_RANGE_7D_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -163,6 +183,7 @@ pub(crate) struct ProxyStorageContext {
     pub(crate) store_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) auth_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) sync_active_auth_on_refresh: bool,
+    pub(crate) settings: Arc<RwLock<AppSettings>>,
 }
 
 #[derive(Clone)]
@@ -196,6 +217,24 @@ struct ApiProxyUsageMetadata {
     route: String,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ApiProxyRequestLogStore {
+    version: u8,
+    updated_at: i64,
+    entries: Vec<ApiProxyRequestLogEntry>,
+}
+
+impl Default for ApiProxyRequestLogStore {
+    fn default() -> Self {
+        Self {
+            version: API_PROXY_REQUEST_LOG_STORE_VERSION,
+            updated_at: 0,
+            entries: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -447,12 +486,14 @@ pub(crate) fn new_proxy_storage_context(
     store_lock: Arc<tokio::sync::Mutex<()>>,
     auth_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     sync_active_auth_on_refresh: bool,
+    settings: Arc<RwLock<AppSettings>>,
 ) -> ProxyStorageContext {
     ProxyStorageContext {
         data_dir,
         store_lock,
         auth_refresh_lock,
         sync_active_auth_on_refresh,
+        settings,
     }
 }
 
@@ -466,6 +507,7 @@ fn app_proxy_storage_context(
         state.store_lock.clone(),
         state.auth_refresh_lock.clone(),
         true,
+        state.settings.clone(),
     ))
 }
 
@@ -770,6 +812,809 @@ pub(crate) async fn clear_api_proxy_usage_stats_with_storage(
 }
 
 #[cfg(feature = "desktop")]
+pub(crate) async fn get_api_proxy_request_logs_internal(
+    app: &AppHandle,
+    state: &AppState,
+    limit: Option<usize>,
+) -> Result<Vec<ApiProxyRequestLogEntry>, String> {
+    let storage = app_proxy_storage_context(app, state)?;
+    get_api_proxy_request_logs_with_storage(&storage, limit).await
+}
+
+pub(crate) async fn get_api_proxy_request_logs_with_storage(
+    storage: &ProxyStorageContext,
+    limit: Option<usize>,
+) -> Result<Vec<ApiProxyRequestLogEntry>, String> {
+    let limit = limit.unwrap_or(API_PROXY_REQUEST_LOG_MAX_ENTRIES).clamp(1, 1_000);
+    let _guard = storage.store_lock.lock().await;
+    let path = api_proxy_request_log_path(storage)?;
+    let mut store = load_api_proxy_request_log_store_from_path(&path)?;
+    prune_api_proxy_request_log_entries(&mut store.entries);
+    if store.entries.len() > API_PROXY_REQUEST_LOG_MAX_ENTRIES || store.entries.is_empty() {
+        let keep = store
+            .entries
+            .iter()
+            .rev()
+            .take(API_PROXY_REQUEST_LOG_MAX_ENTRIES)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        if keep.len() != store.entries.len() {
+            store.entries = keep;
+        }
+    }
+    if store.entries.len() > limit {
+        store.entries = store
+            .entries
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+    }
+    let mut entries = store.entries;
+    entries.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+    Ok(entries)
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) async fn clear_api_proxy_request_logs_internal(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let storage = app_proxy_storage_context(app, state)?;
+    clear_api_proxy_request_logs_with_storage(&storage).await
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) async fn get_api_proxy_request_body_internal(
+    app: &AppHandle,
+    state: &AppState,
+    log_id: &str,
+) -> Result<String, String> {
+    if log_id.is_empty() {
+        return Err("请求日志 id 不能为空".to_string());
+    }
+    let storage = app_proxy_storage_context(app, state)?;
+    get_api_proxy_request_body_with_storage(&storage, log_id).await
+}
+
+pub(crate) async fn get_api_proxy_request_body_with_storage(
+    storage: &ProxyStorageContext,
+    log_id: &str,
+) -> Result<String, String> {
+    eprintln!("[proxy][get_body] enter log_id={log_id:?}");
+    // 安全:仅当 log_id 仅含安全字符时才允许打开文件
+    if !log_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        eprintln!("[proxy][get_body] invalid log_id chars");
+        return Err("请求日志 id 非法".to_string());
+    }
+    let dir = api_proxy_request_body_dir(storage)?;
+    let path = dir.join(format!("{log_id}.json"));
+    eprintln!("[proxy][get_body] path={}", path.display());
+    if !path.exists() {
+        eprintln!("[proxy][get_body] file not found");
+        return Err(format!("请求 body 文件不存在: {log_id}"));
+    }
+    let canonical = match fs::canonicalize(&path) {
+        Ok(p) => p,
+        Err(error) => {
+            eprintln!("[proxy][get_body] canonicalize file failed: {error}");
+            return Err(format!("解析 body 路径失败: {error}"));
+        }
+    };
+    let canonical_dir = match fs::canonicalize(&dir) {
+        Ok(p) => p,
+        Err(error) => {
+            eprintln!("[proxy][get_body] canonicalize dir failed: {error}");
+            return Err(format!("解析 body 目录失败: {error}"));
+        }
+    };
+    if !canonical.starts_with(&canonical_dir) {
+        eprintln!("[proxy][get_body] path escaped dir");
+        return Err("请求 body 路径越界".to_string());
+    }
+    let bytes = match fs::read(&canonical) {
+        Ok(b) => b,
+        Err(error) => {
+            eprintln!("[proxy][get_body] fs::read failed: {error}");
+            return Err(format!("读取请求 body 失败 {}: {error}", canonical.display()));
+        }
+    };
+    eprintln!("[proxy][get_body] read {} bytes, returning", bytes.len());
+    Ok(String::from_utf8(bytes).unwrap_or_else(|err| {
+        let bytes = err.into_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }))
+}
+
+pub(crate) async fn clear_api_proxy_request_logs_with_storage(
+    storage: &ProxyStorageContext,
+) -> Result<(), String> {
+    let now = now_unix_seconds();
+    let _guard = storage.store_lock.lock().await;
+    let path = api_proxy_request_log_path(storage)?;
+    let store = ApiProxyRequestLogStore {
+        updated_at: now,
+        ..ApiProxyRequestLogStore::default()
+    };
+    save_api_proxy_request_log_store_to_path(&path, &store)
+}
+
+fn load_api_proxy_request_log_store_from_path(
+    path: &Path,
+) -> Result<ApiProxyRequestLogStore, String> {
+    if !path.exists() {
+        return Ok(ApiProxyRequestLogStore::default());
+    }
+
+    let raw = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => return Err(format!("读取 API 反代请求日志失败 {}: {error}", path.display())),
+    };
+    if raw.trim().is_empty() {
+        return Ok(ApiProxyRequestLogStore::default());
+    }
+
+    match serde_json::from_str::<ApiProxyRequestLogStore>(&raw) {
+        Ok(mut store) => {
+            if store.version != API_PROXY_REQUEST_LOG_STORE_VERSION {
+                // 旧版本不兼容,清空旧文件避免重复刷警告
+                log::warn!(
+                    "API 反代请求日志 store 版本 {} 与当前 {} 不匹配,已重置 {}",
+                    store.version,
+                    API_PROXY_REQUEST_LOG_STORE_VERSION,
+                    path.display()
+                );
+                let _ = fs::remove_file(path);
+                return Ok(ApiProxyRequestLogStore::default());
+            }
+            store.version = API_PROXY_REQUEST_LOG_STORE_VERSION;
+            Ok(store)
+        }
+        Err(error) => {
+            // 文件存在但解析失败,清掉以免每次 poll 都刷警告
+            log::warn!(
+                "API 反代请求日志格式无效,已重置 {}: {}",
+                path.display(),
+                error
+            );
+            let _ = fs::remove_file(path);
+            Ok(ApiProxyRequestLogStore::default())
+        }
+    }
+}
+
+fn save_api_proxy_request_log_store_to_path(
+    path: &Path,
+    store: &ApiProxyRequestLogStore,
+) -> Result<(), String> {
+    let serialized = serde_json::to_string_pretty(store)
+        .map_err(|error| format!("序列化 API 反代请求日志失败: {error}"))?;
+    write_private_named_file_atomically(path, serialized.as_bytes(), "API 反代请求日志")
+}
+
+fn prune_api_proxy_request_log_entries(entries: &mut Vec<ApiProxyRequestLogEntry>) {
+    entries.retain(|entry| {
+        !entry.method.trim().is_empty()
+            && !entry.path.trim().is_empty()
+            && entry.timestamp > 0
+    });
+}
+
+fn extract_body_summary(body: &Bytes) -> RequestLogBodySummary {
+    let mut summary = RequestLogBodySummary::default();
+    summary.total_bytes = body.len() as u64;
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        summary.other_bytes = summary.total_bytes;
+        return summary;
+    };
+    let Some(object) = value.as_object() else {
+        summary.other_bytes = summary.total_bytes;
+        return summary;
+    };
+
+    // 顶层标量参数
+    summary.model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    summary.max_tokens = object
+        .get("max_tokens")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            object
+                .get("max_output_tokens")
+                .and_then(Value::as_i64)
+        });
+    summary.temperature = object
+        .get("temperature")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite());
+    summary.top_p = object
+        .get("top_p")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite());
+    summary.stream = object.get("stream").and_then(Value::as_bool);
+
+    // system 段
+    if let Some(system_value) = object.get("system") {
+        match system_value {
+            Value::String(text) => {
+                summary.system_bytes = text.len() as u64;
+                summary.system_preview = Some(truncate_preview(text, 500));
+            }
+            Value::Array(blocks) => {
+                let joined = blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                summary.system_bytes = joined.len() as u64;
+                if !joined.is_empty() {
+                    summary.system_preview = Some(truncate_preview(&joined, 500));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // tools 段
+    if let Some(tools) = object.get("tools").and_then(Value::as_array) {
+        summary.tool_count = tools.len() as u32;
+        for tool in tools {
+            if let Some(name) = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                summary.tool_names.push(name.to_string());
+            }
+        }
+        summary.tools_bytes = serde_json::to_string(tools)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0);
+    }
+
+    // messages 段 + 附件统计
+    if let Some(messages) = object.get("messages").and_then(Value::as_array) {
+        summary.message_count = messages.len() as u32;
+        let mut user_count = 0u32;
+        let mut assistant_count = 0u32;
+        let mut attachment_count = 0u32;
+        let mut attachment_bytes: u64 = 0;
+        for message in messages {
+            if let Some(role) = message.get("role").and_then(Value::as_str) {
+                match role {
+                    "user" => user_count += 1,
+                    "assistant" => assistant_count += 1,
+                    _ => {}
+                }
+            }
+            if let Some(content) = message.get("content") {
+                count_attachments_in_content(content, &mut attachment_count, &mut attachment_bytes);
+            }
+        }
+        summary.user_message_count = user_count;
+        summary.assistant_message_count = assistant_count;
+        summary.attachment_count = attachment_count;
+        summary.attachments_bytes = attachment_bytes;
+        summary.messages_bytes = serde_json::to_string(messages)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0);
+    }
+
+    let accounted = summary.system_bytes
+        + summary.tools_bytes
+        + summary.messages_bytes
+        + summary.attachments_bytes;
+    summary.other_bytes = summary.total_bytes.saturating_sub(accounted);
+
+    summary
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(max_chars + 12);
+    for (i, ch) in text.chars().enumerate() {
+        if i >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn count_attachments_in_content(
+    content: &Value,
+    attachment_count: &mut u32,
+    attachment_bytes: &mut u64,
+) {
+    match content {
+        Value::String(text) => {
+            if text.len() > 4 * 1024 {
+                *attachment_count += 1;
+                *attachment_bytes += text.len() as u64;
+            }
+        }
+        Value::Array(blocks) => {
+            for block in blocks {
+                let block_type = block.get("type").and_then(Value::as_str);
+                let is_image_or_file = matches!(
+                    block_type,
+                    Some("image") | Some("image_url") | Some("file") | Some("document")
+                );
+                if is_image_or_file {
+                    *attachment_count += 1;
+                    *attachment_bytes += serde_json::to_string(block)
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0);
+                    continue;
+                }
+                // 兜底:大文本块视为附件(比如工具结果、base64 字符串)
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if text.len() > 16 * 1024 {
+                        *attachment_count += 1;
+                        *attachment_bytes += text.len() as u64;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn api_proxy_request_body_dir(storage: &ProxyStorageContext) -> Result<PathBuf, String> {
+    let configured = storage
+        .settings
+        .read()
+        .ok()
+        .and_then(|guard| guard.api_proxy_request_body_dir.clone())
+        .filter(|value| !value.trim().is_empty());
+
+    let dir = match configured {
+        Some(value) => PathBuf::from(value),
+        None => storage.data_dir.join(API_PROXY_REQUEST_LOG_BODY_DIR),
+    };
+    if !dir.exists() {
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("创建请求 body 目录失败 {}: {error}", dir.display()))?;
+        try_set_private_permissions(&dir)
+            .map_err(|error| format!("设置请求 body 目录权限失败: {error}"))?;
+    }
+    Ok(dir)
+}
+
+pub(crate) fn normalize_request_body_dir(value: Option<String>) -> Option<String> {
+    let trimmed = value.and_then(|raw| {
+        let t = raw.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })?;
+    let path = Path::new(&trimmed);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn write_request_body_file(
+    storage: &ProxyStorageContext,
+    id: &str,
+    body: &Bytes,
+) -> Result<String, String> {
+    if body.is_empty() {
+        return Ok(String::new());
+    }
+    if storage
+        .settings
+        .read()
+        .map(|guard| !guard.api_proxy_request_body_enabled)
+        .unwrap_or(false)
+    {
+        return Ok(String::new());
+    }
+    let dir = api_proxy_request_body_dir(storage)?;
+    let path = dir.join(format!("{id}.json"));
+    fs::write(&path, body.as_ref())
+        .map_err(|error| format!("写入请求 body 失败 {}: {error}", path.display()))?;
+    try_set_private_permissions(&path)
+        .map_err(|error| format!("设置请求 body 文件权限失败: {error}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn remove_request_body_file(storage: &ProxyStorageContext, body_file: &str) {
+    if body_file.is_empty() {
+        return;
+    }
+    let Ok(dir) = api_proxy_request_body_dir(storage) else {
+        return;
+    };
+    let canonical_dir = match fs::canonicalize(&dir) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let Ok(target) = Path::new(body_file).canonicalize() else {
+        return;
+    };
+    // 防止越过 proxy-request-bodies/ 目录
+    if !target.starts_with(&canonical_dir) {
+        return;
+    }
+    let _ = fs::remove_file(&target);
+}
+
+fn summarize_request_headers_for_log(headers: &HeaderMap) -> Vec<ApiProxyRequestLogHeader> {
+    let deny: HashSet<String> = API_PROXY_REQUEST_LOG_HEADER_DENY_LIST
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let mut result: Vec<ApiProxyRequestLogHeader> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (name, value) in headers.iter() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if deny.contains(&lower) {
+            continue;
+        }
+        if !seen.insert(lower.clone()) {
+            continue;
+        }
+        let value_text = value.to_str().unwrap_or("<binary>");
+        if value_text.len() > 256 {
+            result.push(ApiProxyRequestLogHeader {
+                name: name.as_str().to_string(),
+                value: format!("{}…", &value_text[..256]),
+            });
+        } else {
+            result.push(ApiProxyRequestLogHeader {
+                name: name.as_str().to_string(),
+                value: value_text.to_string(),
+            });
+        }
+    }
+    result.sort_by(|left, right| left.name.cmp(&right.name));
+    result
+}
+
+fn client_ip_from_request(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Some(first) = value.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn user_agent_from_request(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn new_request_log_id(timestamp: i64) -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("req-{}-{:x}", timestamp, seq)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_request_log_entry(
+    id: String,
+    method: &str,
+    path: &str,
+    route: Option<&str>,
+    status: u16,
+    duration_ms: i64,
+    started_at: i64,
+    proxy_key: Option<&ApiProxyKey>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    request_headers: &HeaderMap,
+    body_summary: RequestLogBodySummary,
+    body_file: Option<String>,
+    response_excerpt: Option<String>,
+    response_truncated: bool,
+    error: Option<String>,
+) -> ApiProxyRequestLogEntry {
+    let headers_summary = summarize_request_headers_for_log(request_headers);
+    let (key_id, key_label) = match proxy_key {
+        Some(key) => (Some(key.id.clone()), Some(key.label.clone())),
+        None => (None, None),
+    };
+    ApiProxyRequestLogEntry {
+        id,
+        timestamp: started_at,
+        method: method.to_string(),
+        path: path.to_string(),
+        route: route.map(|value| value.to_string()),
+        status,
+        duration_ms: duration_ms.max(0),
+        key_id,
+        key_label,
+        model,
+        reasoning_effort,
+        service_tier,
+        client_ip: client_ip_from_request(request_headers),
+        user_agent: user_agent_from_request(request_headers),
+        request_headers: headers_summary,
+        body_summary,
+        body_file,
+        response_excerpt,
+        response_truncated,
+        error,
+    }
+}
+
+async fn append_api_proxy_request_log(
+    storage: &ProxyStorageContext,
+    entry: ApiProxyRequestLogEntry,
+) {
+    let path = match api_proxy_request_log_path(storage) {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("解析 API 反代请求日志路径失败: {error}");
+            return;
+        }
+    };
+    let load_result = {
+        let _guard = storage.store_lock.lock().await;
+        load_api_proxy_request_log_store_from_path(&path)
+    };
+    let mut store = match load_result {
+        Ok(store) => store,
+        Err(error) => {
+            log::warn!("读取 API 反代请求日志失败: {error}");
+            return;
+        }
+    };
+    store.entries.push(entry);
+    prune_api_proxy_request_log_entries(&mut store.entries);
+    let mut evicted: Vec<String> = Vec::new();
+    if store.entries.len() > API_PROXY_REQUEST_LOG_MAX_ENTRIES {
+        let drop_count = store.entries.len() - API_PROXY_REQUEST_LOG_MAX_ENTRIES;
+        for dropped in store.entries.drain(0..drop_count) {
+            if let Some(file) = dropped.body_file {
+                if !file.is_empty() {
+                    evicted.push(file);
+                }
+            }
+        }
+    }
+    store.updated_at = now_unix_seconds();
+    let write_result = {
+        let _guard = storage.store_lock.lock().await;
+        save_api_proxy_request_log_store_to_path(&path, &store)
+    };
+    if let Err(error) = write_result {
+        log::warn!("写入 API 反代请求日志失败: {error}");
+    }
+    for file in evicted {
+        remove_request_body_file(storage, &file);
+    }
+}
+
+fn spawn_request_log(
+    storage: ProxyStorageContext,
+    id: String,
+    method: String,
+    path: String,
+    route: Option<String>,
+    status: u16,
+    started_at: i64,
+    proxy_key: Option<ApiProxyKey>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    request_headers: Vec<(String, String)>,
+    body_summary: RequestLogBodySummary,
+    body_file: Option<String>,
+    response_excerpt: Option<String>,
+    response_truncated: bool,
+    error: Option<String>,
+) {
+    tokio::spawn(async move {
+        let mut header_map = HeaderMap::new();
+        for (name, value) in &request_headers {
+            if let (Ok(header_name), Ok(header_value)) = (
+                axum::http::HeaderName::from_bytes(name.as_bytes()),
+                axum::http::HeaderValue::from_str(value),
+            ) {
+                header_map.insert(header_name, header_value);
+            }
+        }
+        let entry = build_request_log_entry(
+            id,
+            &method,
+            &path,
+            route.as_deref(),
+            status,
+            (now_unix_seconds().saturating_sub(started_at)) * 1000,
+            started_at,
+            proxy_key.as_ref(),
+            model,
+            reasoning_effort,
+            service_tier,
+            &header_map,
+            body_summary,
+            body_file,
+            response_excerpt,
+            response_truncated,
+            error,
+        );
+        append_api_proxy_request_log(&storage, entry).await;
+    });
+}
+
+fn extract_request_log_fields_from_body(
+    body: &Bytes,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return (None, None, None);
+    };
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let reasoning = value
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let tier = value
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    (model, reasoning, tier)
+}
+
+/// 从 Responses API 请求体的 `input` 数组里抽出「最后一条 role=user 消息」的纯文本预览。
+/// - 跳过 `type-only` 项(reasoning 等无 role 字段的条目自动忽略)
+/// - `content` 为字符串时直接用;为数组时只串联 `type == "input_text"` 块的 `text`,跳过图片等附件
+/// - 找不到 user / 解析失败 / 抽出来的文本是空白时返回 `None`
+fn extract_last_user_message_preview(body: &Bytes, max_chars: usize) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let items = value.get("input")?.as_array()?;
+    let last_user = items
+        .iter()
+        .rev()
+        .find(|item| item.get("role").and_then(Value::as_str) == Some("user"))?;
+    let raw = match last_user.get("content")? {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                if part.get("type").and_then(Value::as_str) == Some("input_text") {
+                    part.get("text").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    let trimmed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate_preview(&trimmed, max_chars))
+}
+
+async fn request_log_middleware(
+    State(context): State<Arc<ProxyContext>>,
+    request: Request,
+    next: Next,
+) -> Response<Body> {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let headers = request.headers().clone();
+
+    let (parts, body) = request.into_parts();
+    let body_bytes = match axum::body::to_bytes(body, request_body_limit()).await {
+        Ok(bytes) => bytes,
+        Err(_) => Bytes::new(),
+    };
+    let (model, reasoning, tier) = extract_request_log_fields_from_body(&body_bytes);
+    let user_preview =
+        extract_last_user_message_preview(&body_bytes, API_PROXY_REQUEST_LOG_USER_PREVIEW_CHARS);
+    log::info!(
+        "API proxy 请求来了 method={method} path={path} model={} user_preview={}",
+        model.as_deref().unwrap_or("-"),
+        user_preview
+            .as_deref()
+            .map(|preview| format!("\"{preview}\""))
+            .unwrap_or_else(|| "<none>".to_string()),
+    );
+    let resolved_key = if path.starts_with("/v1/claude")
+        || path == "/v1/messages"
+        || path == "/v1/models"
+    {
+        authorize_anthropic_proxy_request(&headers, &context.api_keys).ok()
+    } else {
+        authorize_proxy_request(&headers, &context.api_keys).ok()
+    };
+    let headers_for_log = headers.clone();
+    let new_request = Request::from_parts(parts, axum::body::Body::from(body_bytes.clone()));
+    let started_at = now_unix_seconds();
+
+    let response = next.run(new_request).await;
+    let status = response.status().as_u16();
+    let body_summary = extract_body_summary(&body_bytes);
+    let log_id = new_request_log_id(started_at);
+    let body_file = match write_request_body_file(&context.storage, &log_id, &body_bytes) {
+        Ok(path) if !path.is_empty() => Some(path),
+        Ok(_) => None,
+        Err(error) => {
+            log::warn!("写入请求 body 文件失败: {error}");
+            None
+        }
+    };
+    spawn_request_log(
+        context.storage.clone(),
+        log_id,
+        method,
+        path,
+        None,
+        status,
+        started_at,
+        resolved_key,
+        model,
+        reasoning,
+        tier,
+        headers_for_log
+            .iter()
+            .filter_map(|(name, value)| {
+                let name_str = name.as_str().to_string();
+                let value_str = value.to_str().ok()?.to_string();
+                Some((name_str, value_str))
+            })
+            .collect::<Vec<_>>(),
+        body_summary,
+        body_file,
+        None,
+        false,
+        None,
+    );
+    response
+}
+
+fn request_body_limit() -> usize {
+    resolve_proxy_request_body_limit_bytes()
+}
+
+#[cfg(feature = "desktop")]
 pub(crate) async fn start_api_proxy_internal(
     app: &AppHandle,
     state: &AppState,
@@ -874,6 +1719,10 @@ pub(crate) async fn start_api_proxy_with_runtime(
         .route("/v1/claude/v1/models", get(claude_models_handler))
         .fallback(any(unsupported_proxy_handler))
         .layer(DefaultBodyLimit::max(request_body_limit))
+        .layer(axum::middleware::from_fn_with_state(
+            context.clone(),
+            request_log_middleware,
+        ))
         .with_state(context.clone());
 
     let task = tokio::spawn(async move {
@@ -4983,6 +5832,10 @@ fn api_proxy_usage_path(storage: &ProxyStorageContext) -> Result<PathBuf, String
     Ok(storage.data_dir.join(API_PROXY_USAGE_FILE_NAME))
 }
 
+fn api_proxy_request_log_path(storage: &ProxyStorageContext) -> Result<PathBuf, String> {
+    Ok(storage.data_dir.join(API_PROXY_REQUEST_LOG_FILE_NAME))
+}
+
 async fn record_api_proxy_call_success(
     context: &ProxyContext,
     proxy_key: &ApiProxyKey,
@@ -7131,6 +7984,7 @@ fn parse_proxy_request_body_limit_mib(value: Option<&str>) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Bytes;
     use super::account_to_proxy_candidate;
     use super::api_proxy_disabled_model_set;
     use super::api_proxy_requested_models_from_payload;
@@ -7206,6 +8060,7 @@ mod tests {
     use serde_json::Value;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::RwLock;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
@@ -7326,6 +8181,7 @@ mod tests {
                 store_lock: Arc::new(tokio::sync::Mutex::new(())),
                 auth_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
                 sync_active_auth_on_refresh: false,
+                settings: Arc::new(RwLock::new(AppSettings::default())),
             },
             data_dir,
         )
@@ -7336,6 +8192,57 @@ mod tests {
     fn desktop_proxy_binds_lan_interfaces_but_keeps_loopback_base_url() {
         assert_eq!(super::DESKTOP_API_PROXY_BIND_HOST, "0.0.0.0");
         assert_eq!(super::proxy_base_url(8787), "http://127.0.0.1:8787/v1");
+    }
+
+    #[test]
+    fn extract_last_user_message_preview_handles_string_array_and_missing_input() {
+        // 1) 纯字符串 content,直接返回原文本(连续空白压成单空格)
+        let plain = Bytes::from(
+            r#"{"input":[{"role":"developer","content":"system"},{"role":"user","content":"  你好  world  "}]}"#,
+        );
+        assert_eq!(
+            super::extract_last_user_message_preview(&plain, 200),
+            Some("你好 world".to_string())
+        );
+
+        // 2) 数组 content 只取 input_text,跳过 input_image;user 消息夹在 reasoning/assistant 之间也能拿到「最后一条」
+        let multimodal = Bytes::from(
+            r#"{"input":[
+                {"role":"developer","content":"sys"},
+                {"type":"reasoning","encrypted_content":"gAAAAA"},
+                {"role":"assistant","content":[{"type":"output_text","text":"old reply"}]},
+                {"role":"user","content":[
+                    {"type":"input_text","text":"看看这张图"},
+                    {"type":"input_image","image_url":"data:image/png;base64,XXX"},
+                    {"type":"input_text","text":"哪里出错了"}
+                ]}
+            ]}"#,
+        );
+        let preview = super::extract_last_user_message_preview(&multimodal, 200).unwrap();
+        assert!(preview.contains("看看这张图"));
+        assert!(preview.contains("哪里出错了"));
+        assert!(!preview.contains("data:image"));
+
+        // 3) 没有任何 user 消息时返回 None
+        let no_user = Bytes::from(
+            r#"{"input":[{"role":"developer","content":"sys"},{"role":"assistant","content":"hi"}]}"#,
+        );
+        assert!(super::extract_last_user_message_preview(&no_user, 200).is_none());
+
+        // 4) body 不是合法 JSON 也返回 None
+        let broken = Bytes::from_static(b"not-json");
+        assert!(super::extract_last_user_message_preview(&broken, 200).is_none());
+    }
+
+    #[test]
+    fn extract_last_user_message_preview_truncates_long_text_with_ellipsis() {
+        let long_text = "啊".repeat(500);
+        let body = format!(r#"{{"input":[{{"role":"user","content":"{}"}}]}}"#, long_text);
+        let preview =
+            super::extract_last_user_message_preview(&Bytes::from(body), 50).unwrap();
+        // 50 个字符 + 末尾省略号
+        assert!(preview.ends_with('…'));
+        assert!(preview.chars().count() <= 51);
     }
 
     #[test]

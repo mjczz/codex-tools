@@ -5,12 +5,36 @@ use crate::cli;
 use crate::models::normalize_api_proxy_sequential_five_hour_limit_percent;
 use crate::models::AppSettings;
 use crate::models::AppSettingsPatch;
+use crate::proxy_service::normalize_request_body_dir;
 use crate::proxy_service::sanitize_api_proxy_disabled_models_for_settings;
 use crate::state::AppState;
 use crate::store::load_store;
 use crate::store::save_store;
 
-/// 读取应用设置（前端设置页使用）。
+/// 应用启动时把磁盘上的 settings 灌进 `AppState.settings`,
+/// 供运行中的代理等组件即时读取最新配置。
+pub(crate) fn hydrate_settings_from_store(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let store = load_store(app)?;
+    let mut settings = store.settings;
+    if settings
+        .codex_launch_path
+        .as_deref()
+        .is_some_and(should_discard_codex_launch_path)
+    {
+        settings.codex_launch_path = None;
+    }
+    settings.api_proxy_request_body_dir =
+        normalize_request_body_dir(settings.api_proxy_request_body_dir);
+    *state.settings.write().map_err(|error| {
+        format!("写入内存设置锁失败: {error}")
+    })? = settings;
+    Ok(())
+}
+
+/// 读取应用设置(前端设置页使用)。
 pub(crate) async fn get_app_settings_internal(
     app: &AppHandle,
     state: &AppState,
@@ -90,6 +114,13 @@ pub(crate) async fn update_app_settings_internal(
             store.settings.api_proxy_disabled_models =
                 sanitize_api_proxy_disabled_models_for_settings(value);
         }
+        if let Some(value) = patch.api_proxy_request_body_enabled {
+            store.settings.api_proxy_request_body_enabled = value;
+        }
+        if let Some(value) = patch.api_proxy_request_body_dir {
+            store.settings.api_proxy_request_body_dir =
+                normalize_request_body_dir(value);
+        }
         if let Some(value) = patch.codex_analytics_weekly_budget_usd {
             store.settings.codex_analytics_weekly_budget_usd = normalize_weekly_budget(value);
         }
@@ -110,6 +141,11 @@ pub(crate) async fn update_app_settings_internal(
 
     if let Some(value) = launch_at_startup_to_apply {
         set_system_autostart(app, value)?;
+    }
+
+    // 同步到运行中的内存锁,让正在跑的代理立即感知新值
+    if let Ok(mut guard) = state.settings.write() {
+        *guard = settings.clone();
     }
 
     Ok(settings)

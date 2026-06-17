@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 
 use crate::auth::PendingOauthLogin;
 use crate::models::ApiProxyKey;
+use crate::models::AppSettings;
 use crate::models::CloudflaredTunnelMode;
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ pub(crate) struct OauthCallbackListenerHandle {
 pub(crate) struct AppState {
     pub(crate) store_lock: Arc<Mutex<()>>,
     pub(crate) auth_refresh_lock: Arc<Mutex<()>>,
+    pub(crate) settings: Arc<RwLock<AppSettings>>,
     pub(crate) oauth_flow_lock: Arc<Mutex<()>>,
     pub(crate) pending_oauth_login: Mutex<Option<PendingOauthLogin>>,
     pub(crate) oauth_listener: Mutex<Option<OauthCallbackListenerHandle>>,
@@ -77,6 +79,7 @@ impl Default for AppState {
         Self {
             store_lock: Arc::new(Mutex::new(())),
             auth_refresh_lock: Arc::new(Mutex::new(())),
+            settings: Arc::new(RwLock::new(AppSettings::default())),
             oauth_flow_lock: Arc::new(Mutex::new(())),
             pending_oauth_login: Mutex::new(None),
             oauth_listener: Mutex::new(None),
