@@ -1550,12 +1550,17 @@ async fn request_log_middleware(
     let user_preview =
         extract_last_user_message_preview(&body_bytes, API_PROXY_REQUEST_LOG_USER_PREVIEW_CHARS);
     log::info!(
-        "API proxy 请求来了 method={method} path={path} model={} user_preview={}",
+        "\x1b[36mAPI proxy\x1b[0m 请求来了 \
+         method=\x1b[33m{method}\x1b[0m \
+         path=\x1b[33m{path}\x1b[0m \
+         model=\x1b[35m{}\x1b[0m \
+         user_preview={}",
         model.as_deref().unwrap_or("-"),
-        user_preview
-            .as_deref()
-            .map(|preview| format!("\"{preview}\""))
-            .unwrap_or_else(|| "<none>".to_string()),
+        if let Some(preview) = user_preview.as_deref() {
+            format!("\x1b[32m\"{preview}\"\x1b[0m")
+        } else {
+            "\x1b[31m<none>\x1b[0m".to_string()
+        },
     );
     let resolved_key = if path.starts_with("/v1/claude")
         || path == "/v1/messages"
