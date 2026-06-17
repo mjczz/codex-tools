@@ -861,6 +861,8 @@ pub(crate) async fn start_api_proxy_with_runtime(
             post(responses_handler).get(responses_websocket_handler),
         )
         .route("/v1/messages", post(anthropic_messages_handler))
+        .route("/v1/claude/v1/messages", post(claude_messages_handler))
+        .route("/v1/claude/messages", post(claude_messages_handler))
         .fallback(any(unsupported_proxy_handler))
         .layer(DefaultBodyLimit::max(request_body_limit))
         .with_state(context.clone());
@@ -1238,6 +1240,94 @@ async fn anthropic_messages_handler(
     update_proxy_error(&context, None).await;
     let usage_metadata =
         api_proxy_usage_metadata(&proxy_key, &candidate, "/v1/messages", &upstream_payload);
+
+    if downstream_stream {
+        build_anthropic_streaming_response(
+            upstream_response,
+            context.storage.clone(),
+            usage_metadata,
+        )
+    } else {
+        let (upstream_headers, upstream_body) = match upstream_response.into_bytes().await {
+            Ok(value) => value,
+            Err(error) => {
+                let message = format!("读取 Codex 上游响应失败: {error}");
+                update_proxy_error(&context, Some(message.clone())).await;
+                return json_error_response(StatusCode::BAD_GATEWAY, &message);
+            }
+        };
+
+        let completed = match extract_completed_response_from_sse(&upstream_body) {
+            Ok(value) => value,
+            Err(message) => {
+                update_proxy_error(&context, Some(message.clone())).await;
+                return json_error_response(StatusCode::BAD_GATEWAY, &message);
+            }
+        };
+        record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed).await;
+
+        let body = match serde_json::to_vec(&convert_completed_response_to_anthropic_message(
+            &completed,
+        )) {
+            Ok(bytes) => Bytes::from(bytes),
+            Err(error) => {
+                let message = format!("序列化 Anthropic Messages 响应失败: {error}");
+                update_proxy_error(&context, Some(message.clone())).await;
+                return json_error_response(StatusCode::BAD_GATEWAY, &message);
+            }
+        };
+
+        build_json_proxy_response(StatusCode::OK, &upstream_headers, body)
+    }
+}
+
+async fn claude_messages_handler(
+    State(context): State<Arc<ProxyContext>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let proxy_key = match authorize_anthropic_proxy_request(&headers, &context.api_keys) {
+        Ok(proxy_key) => proxy_key,
+        Err(response) => return response,
+    };
+
+    let request_json = match parse_json_request(&body) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let session_affinity_key = request_session_affinity_key(&headers, &request_json);
+
+    let (mut upstream_payload, downstream_stream) =
+        match convert_anthropic_messages_request_to_codex(&request_json) {
+            Ok(value) => value,
+            Err(message) => return invalid_request_response(&message),
+        };
+
+    // 方案 A:删除 max_output_tokens 字段,绕过上游 FastAPI relay 不支持该字段的限制。
+    // 幂等:键不存在也不报错,且不影响原 /v1/messages 路径(convert 函数与既有测试一字未改)。
+    if let Some(obj) = upstream_payload.as_object_mut() {
+        obj.remove("max_output_tokens");
+    }
+
+    let upstream = match send_codex_request_over_candidates(
+        &context,
+        &proxy_key,
+        "/v1/claude",
+        &headers,
+        &upstream_payload,
+        session_affinity_key.as_deref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    let (candidate, upstream_response) = upstream;
+    update_proxy_target(&context, &candidate).await;
+    update_proxy_error(&context, None).await;
+    let usage_metadata =
+        api_proxy_usage_metadata(&proxy_key, &candidate, "/v1/claude", &upstream_payload);
 
     if downstream_stream {
         build_anthropic_streaming_response(
@@ -1741,7 +1831,7 @@ async fn unsupported_proxy_handler(
     json_error_response(
         StatusCode::NOT_FOUND,
         &format!(
-            "当前反代只支持 GET /v1/models、POST /v1/chat/completions、POST /v1/responses、POST /v1/messages、POST /v1/images/generations、POST /v1/images/edits、POST /v1/images/variations，收到的是 {method} {}",
+            "当前反代只支持 GET /v1/models、POST /v1/chat/completions、POST /v1/responses、POST /v1/messages、POST /v1/claude/v1/messages、POST /v1/claude/messages、POST /v1/images/generations、POST /v1/images/edits、POST /v1/images/variations，收到的是 {method} {}",
             uri.path()
         ),
     )
