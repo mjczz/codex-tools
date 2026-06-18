@@ -5027,7 +5027,7 @@ fn log_proxy_response_route(route: &str, status: StatusCode) {
         code.to_string()
     };
     log::info!(
-        "\x1b[36mAPI proxy\x1b[0m route=\x1b[33m{route}\x1b[0m status={status_painted}",
+        "\x1b[36m响应\x1b[0m route=\x1b[33m{route}\x1b[0m status={status_painted}\n",
     );
 }
 
