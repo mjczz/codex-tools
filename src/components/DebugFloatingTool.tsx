@@ -3,6 +3,7 @@ type DebugFloatingToolProps = {
 };
 
 export function DebugFloatingTool({ onOpenUpdateDialog }: DebugFloatingToolProps) {
+  return null;
   if (!import.meta.env.DEV) {
     return null;
   }
